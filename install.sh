@@ -143,7 +143,7 @@ package_url="$(printf '%s\n' "$asset_urls" | grep -E "$asset_pattern" | head -n 
 package_name="${package_url##*/}"
 
 escaped_version="$(printf '%s' "$openwrt_version" | sed 's/\./\\./g')"
-checksum_url="$(printf '%s\n' "$asset_urls" | grep -E "(openwrt-${escaped_version}-${target}-)?sha256sums\\.txt$" | head -n 1 || true)"
+checksum_url="$(printf '%s\n' "$asset_urls" | grep -E "/(openwrt-${escaped_version}-${target}-sha256sums|sha256sums)\\.txt$" | head -n 1 || true)"
 
 log "release: $tag"
 log "architecture: $machine ($target)"
