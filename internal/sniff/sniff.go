@@ -1,6 +1,7 @@
 package sniff
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"strings"
@@ -12,18 +13,40 @@ func Stream(data []byte) (protocol, domain string, err error) {
 	if len(data) == 0 {
 		return "", "", ErrNeedMore
 	}
-	if data[0] == 0x16 {
+	if looksTLS(data) {
 		return tls(data)
 	}
-	return http(data)
+	if looksHTTP(data) {
+		return http(data)
+	}
+	if matchPrefix(data, []byte("SSH-2.0-")) {
+		if !bytes.Contains(data, []byte{'\n'}) {
+			return "", "", ErrNeedMore
+		}
+		return "ssh", "", nil
+	}
+	if matchPrefix(data, []byte("\x13BitTorrent protocol")) {
+		if len(data) < 20 {
+			return "", "", ErrNeedMore
+		}
+		return "bittorrent", "", nil
+	}
+	if protocol, ok, needMore := detectRDP(data); ok {
+		return protocol, "", nil
+	} else if needMore {
+		return "", "", ErrNeedMore
+	}
+	return "", "", errors.New("unknown stream protocol")
 }
 
 func Packet(srcPort, dstPort uint16, data []byte, state *PacketState) (protocol, domain string, err error) {
-	if srcPort == 53 || dstPort == 53 {
+	if srcPort == 53 || dstPort == 53 || looksDNSQuery(data) {
 		domain, err = dns(data)
-		return "dns", domain, err
+		if err == nil || srcPort == 53 || dstPort == 53 {
+			return "dns", domain, err
+		}
 	}
-	if srcPort == 443 || dstPort == 443 {
+	if looksQUIC(data) || srcPort == 443 || dstPort == 443 {
 		if state == nil {
 			state = &PacketState{}
 		}
@@ -31,15 +54,47 @@ func Packet(srcPort, dstPort uint16, data []byte, state *PacketState) (protocol,
 		if errors.Is(err, ErrNeedMore) {
 			return "quic", "", nil
 		}
-		if err != nil {
+		if err != nil && looksQUIC(data) {
 			return "quic", "", nil
 		}
-		return "quic", domain, nil
+		if err == nil {
+			return "quic", domain, nil
+		}
 	}
-	if srcPort == 123 || dstPort == 123 {
+	if looksSTUN(data) {
+		return "stun", "", nil
+	}
+	if looksDTLS(data) {
+		return "dtls", "", nil
+	}
+	if looksBitTorrentPacket(data) {
+		return "bittorrent", "", nil
+	}
+	if looksNTP(data) || ((srcPort == 123 || dstPort == 123) && len(data) >= 48) {
 		return "ntp", "", nil
 	}
 	return "", "", errors.New("unknown packet protocol")
+}
+
+func looksTLS(data []byte) bool {
+	return len(data) > 0 && data[0] == 0x16
+}
+
+func looksHTTP(data []byte) bool {
+	for _, method := range []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT ", "TRACE "} {
+		if matchPrefix(data, []byte(method)) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchPrefix(data, signature []byte) bool {
+	compare := len(data)
+	if compare > len(signature) {
+		compare = len(signature)
+	}
+	return compare > 0 && bytes.Equal(data[:compare], signature[:compare])
 }
 
 func http(data []byte) (string, string, error) {
@@ -49,7 +104,7 @@ func http(data []byte) (string, string, error) {
 		return "", "", ErrNeedMore
 	}
 	first := s[:lineEnd]
-	methods := []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT "}
+	methods := []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT ", "TRACE "}
 	valid := false
 	for _, method := range methods {
 		if strings.HasPrefix(first, method) {
@@ -84,7 +139,7 @@ func tls(data []byte) (string, string, error) {
 	if len(data) < 5+recordLen {
 		return "", "", ErrNeedMore
 	}
-	if data[5] != 1 || len(data) < 44 {
+	if len(data) < 44 || data[5] != 1 {
 		return "", "", errors.New("not client hello")
 	}
 	p := 43

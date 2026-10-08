@@ -31,7 +31,7 @@ function App() {
     {status?.capture.nft_set_errors&&Object.entries(status.capture.nft_set_errors).map(([name,message])=><div className="warning" key={name}><strong>nft {name}</strong>: {message}</div>)}
     <section className="metrics">
       <Metric label="采集状态" value={status?.capture.capturing?'正在观察':'已停止'} accent={!!status?.capture.capturing}/>
-      <Metric label="窗口连接" value={String(flows.size)}/><Metric label="已识别域名" value={String(Array.from(flows.values()).filter(f=>f.domain).length)}/><Metric label="内核丢包" value={String(status?.capture.drops??0)} warn={(status?.capture.drops??0)>0}/>
+      <Metric label="窗口连接" value={String(flows.size)}/><Metric label="已识别流量" value={String(Array.from(flows.values()).filter(f=>f.protocol).length)}/><Metric label="内核丢包" value={String(status?.capture.drops??0)} warn={(status?.capture.drops??0)>0}/>
     </section>
     <section className="capture-detail"><span>接口 {status?.capture.interfaces.join(', ')||'—'}</span><span>LAN {status?.capture.lan_prefixes?.join(', ')||'自动发现中'}</span><span>cBPF {status?.capture.bpf_enabled?'已启用':'未启用'}</span><span>nft 标记 {status?.capture.nft_set_enabled?'已启用':'未配置'}</span><span>采集 {status?.capture.packets??0} 包</span><span>队列冻结 {status?.capture.queue_freezes??0}</span><span>推送丢弃 {status?.event_drops??0}</span></section>
     <section className="panel"><div className="toolbar"><input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="搜索客户端、目标、协议、域名或 proxy"/><div><button className="ghost" onClick={clear}>清空窗口</button></div></div>

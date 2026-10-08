@@ -18,6 +18,13 @@ NFQUEUE, or forwarding rules.
 - optional nftables-set matching to label destinations handled by sing-box
 - OpenWrt procd/UCI packaging
 
+## P1 protocol detection
+
+Detection is content-based rather than limited to well-known ports. Supported
+protocols are DNS, HTTP, TLS, QUIC, SSH, RDP, STUN, DTLS, NTP, and BitTorrent
+(TCP handshake, UDP tracker, and uTP SYN). Signatures inspect only bounded flow
+prefixes and do not retain payloads after classification.
+
 The observer records LAN-originated flows, including traffic later intercepted
 by sing-box. Capture only LAN-facing interfaces to avoid counting the sing-box
 outbound connection as a second client flow.
@@ -102,6 +109,7 @@ of v0.1; use an authenticated reverse proxy if untrusted clients can reach it.
 
 ## Attribution
 
-The QUIC Initial decoding in `internal/sniff/quic.go` is adapted from
+The compact protocol signatures and QUIC Initial decoding under
+`internal/sniff` are adapted from
 [SagerNet/sing-box](https://github.com/SagerNet/sing-box), licensed under
 GPL-3.0-or-later. See `THIRD_PARTY_NOTICES.md` for details.
