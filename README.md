@@ -47,6 +47,12 @@ After a GitHub Release has been published, install the latest compatible build:
 curl -fsSL https://raw.githubusercontent.com/eeelin/openwrt-sniff/main/install.sh | sh
 ```
 
+Install the current development snapshot directly on an OpenWrt device:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/eeelin/openwrt-sniff/main/install.sh | sh -s -- --snapshot
+```
+
 The installer detects `apk`/`opkg` and x86-64/aarch64, verifies release
 checksums, enables the service, and restarts it.
 

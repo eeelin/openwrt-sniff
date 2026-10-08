@@ -4,6 +4,7 @@ set -eu
 
 REPO="${OPENWRT_SNIFF_GITHUB_REPO:-eeelin/openwrt-sniff}"
 VERSION='latest'
+SNAPSHOT=0
 LOCAL_PACKAGE=''
 DRY_RUN=0
 START_SERVICE=1
@@ -20,6 +21,7 @@ package produced by ./build.sh.
 
 Options:
   --version TAG   Install a specific GitHub release tag (default: latest)
+  --snapshot      Install the latest successful build from the main branch
   --local FILE    Install a local .ipk or .apk instead of downloading a release
   --dry-run       Show the selected package without installing it
   --no-start      Install the package without enabling or restarting the service
@@ -32,6 +34,7 @@ Environment:
 Examples:
   curl -fsSL https://raw.githubusercontent.com/eeelin/openwrt-sniff/main/install.sh | sh
   ./install.sh --version v0.1.0
+  ./install.sh --snapshot
   ./install.sh --local /tmp/openwrt-sniff_0.1.0-1_x86_64.ipk
 EOF
 }
@@ -46,6 +49,7 @@ while [ "$#" -gt 0 ]; do
 			[ "$#" -ge 2 ] || fail '--local requires a package path'
 			LOCAL_PACKAGE="$2"; shift 2
 			;;
+		--snapshot) SNAPSHOT=1; VERSION='snapshot'; shift ;;
 		--dry-run) DRY_RUN=1; shift ;;
 		--no-start) START_SERVICE=0; shift ;;
 		-h|--help) usage; exit 0 ;;
@@ -124,10 +128,15 @@ tag="$(printf '%s\n' "$release_json" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1
 package_version="${tag#v}"
 asset_urls="$(printf '%s\n' "$release_json" | sed -n 's/.*"browser_download_url": *"\([^"]*\)".*/\1/p')"
 
-if [ "$package_manager" = apk ]; then
-	asset_pattern="(openwrt-${openwrt_version}-${target}-)?openwrt-sniff-${package_version}-r[0-9]+\\.apk$"
+if [ "$SNAPSHOT" = 1 ]; then
+	package_version_pattern='[^/]+'
 else
-	asset_pattern="(openwrt-${openwrt_version}-${target}-)?openwrt-sniff_${package_version}-[0-9]+_${package_arch}\\.ipk$"
+	package_version_pattern="$package_version"
+fi
+if [ "$package_manager" = apk ]; then
+	asset_pattern="(openwrt-${openwrt_version}-${target}-)?openwrt-sniff-${package_version_pattern}-r[0-9]+\\.apk$"
+else
+	asset_pattern="(openwrt-${openwrt_version}-${target}-)?openwrt-sniff_${package_version_pattern}-[0-9]+_${package_arch}\\.ipk$"
 fi
 package_url="$(printf '%s\n' "$asset_urls" | grep -E "$asset_pattern" | head -n 1 || true)"
 [ -n "$package_url" ] || fail "release $tag has no compatible $package_manager package for $machine"
@@ -162,4 +171,3 @@ fi
 log "installing $tag"
 install_package "$package_file"
 finish_install
-

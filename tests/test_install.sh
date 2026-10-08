@@ -46,6 +46,11 @@ output="$(PATH="$work/bin:$PATH" TEST_APK_ARGS="$work/apk.args" TEST_RELEASE_JSO
 [[ "$output" == *'checksum verified'* ]]
 grep -Eq '^add --allow-untrusted .*/openwrt-25\.12\.5-rockchip-armv8-openwrt-sniff-0\.1\.0-r1\.apk$' "$work/apk.args"
 
+sed 's/"v0.1.0"/"snapshot"/' "$work/release.json" >"$work/snapshot.json"
+snapshot_output="$(PATH="$work/bin:$PATH" TEST_RELEASE_JSON="$work/snapshot.json" "$INSTALLER" --snapshot --dry-run)"
+[[ "$snapshot_output" == *'release: snapshot'* ]]
+[[ "$snapshot_output" == *'openwrt-sniff-0.1.0-r1.apk'* ]]
+
 PATH="$work/bin:$PATH" TEST_APK_ARGS="$work/local.args" "$INSTALLER" --local "$work/package.apk" --no-start >/dev/null
 grep -Eq '^add --allow-untrusted .*/package\.apk$' "$work/local.args"
 

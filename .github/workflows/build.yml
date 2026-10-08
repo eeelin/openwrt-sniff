@@ -82,3 +82,40 @@ jobs:
           name: ${{ matrix.name }}
           path: dist/${{ matrix.name }}/*
           if-no-files-found: error
+
+  publish-snapshot:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+      - name: Prepare snapshot assets
+        run: |
+          set -euo pipefail
+          mkdir snapshot-assets
+          for directory in downloaded/openwrt-*; do
+            target="$(basename "$directory")"
+            package="$(find "$directory" -maxdepth 1 -type f \( -name '*.ipk' -o -name '*.apk' \) | head -n 1)"
+            test -n "$package"
+            output="snapshot-assets/${target}-$(basename "$package")"
+            cp "$package" "$output"
+            (
+              cd snapshot-assets
+              sha256sum "$(basename "$output")" >"${target}-sha256sums.txt"
+            )
+          done
+          find snapshot-assets -maxdepth 1 -type f -print
+      - name: Replace snapshot prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete snapshot --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create snapshot snapshot-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --prerelease \
+            --title 'Development snapshot' \
+            --notes "Automated build of main at ${GITHUB_SHA}. This snapshot may be replaced at any time."
