@@ -16,7 +16,7 @@ func TestDNS(t *testing.T) {
 	packet := make([]byte, 12)
 	binary.BigEndian.PutUint16(packet[4:6], 1)
 	packet = append(packet, 3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1)
-	protocol, domain, err := Packet(12345, 53, packet)
+	protocol, domain, err := Packet(12345, 53, packet, nil)
 	if err != nil || protocol != "dns" || domain != "www.example.com" {
 		t.Fatalf("got %q %q %v", protocol, domain, err)
 	}

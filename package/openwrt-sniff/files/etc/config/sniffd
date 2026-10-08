@@ -2,7 +2,11 @@ config main 'main'
 	option enabled '1'
 	option listen '0.0.0.0:8088'
 	list interface 'br-lan'
+	# Optional. When empty, sniffd discovers IPv4 and IPv6 prefixes from br-lan.
+	# list lan_prefix '192.168.1.0/24'
+	# Optional proxy target sets. Format: family:table:set
+	# list nft_set 'inet:fw4:singbox_proxy4'
+	# list nft_set 'inet:fw4:singbox_proxy6'
 	option window '5m'
 	option max_flows '4096'
 	option max_stream_bytes '16384'
-

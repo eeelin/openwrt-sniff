@@ -5,11 +5,15 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/eeelin/openwrt-sniff/internal/flow"
+	"github.com/eeelin/openwrt-sniff/internal/nftset"
 	"github.com/eeelin/openwrt-sniff/internal/sniff"
 	"github.com/gopacket/gopacket/afpacket"
 )
@@ -20,26 +24,46 @@ type streamState struct {
 	touched time.Time
 	done    bool
 }
+type packetState struct {
+	sniff   sniff.PacketState
+	touched time.Time
+	done    bool
+}
 type Status struct {
-	Capturing  bool     `json:"capturing"`
-	Interfaces []string `json:"interfaces"`
-	StartedAt  int64    `json:"started_at,omitempty"`
-	Error      string   `json:"error,omitempty"`
+	Capturing     bool              `json:"capturing"`
+	Interfaces    []string          `json:"interfaces"`
+	LANPrefixes   []string          `json:"lan_prefixes"`
+	BPFEnabled    bool              `json:"bpf_enabled"`
+	StartedAt     int64             `json:"started_at,omitempty"`
+	Errors        map[string]string `json:"errors,omitempty"`
+	Packets       uint64            `json:"packets"`
+	Drops         uint64            `json:"drops"`
+	QueueFreezes  uint64            `json:"queue_freezes"`
+	NFTSetEnabled bool              `json:"nft_set_enabled"`
+	NFTSetErrors  map[string]string `json:"nft_set_errors,omitempty"`
 }
 
 type Manager struct {
-	mu         sync.Mutex
-	interfaces []string
-	maxStream  int
-	store      *flow.Store
-	cancel     context.CancelFunc
-	status     Status
-	streams    map[flow.Key]*streamState
-	packets    uint64
+	mu            sync.Mutex
+	interfaces    []string
+	prefixes      []netip.Prefix
+	maxStream     int
+	store         *flow.Store
+	matcher       *nftset.Matcher
+	cancel        context.CancelFunc
+	status        Status
+	streams       map[flow.Key]*streamState
+	packetStreams map[flow.Key]*packetState
+	packets       uint64
+	generation    uint64
+	active        int
+	received      atomic.Uint64
+	drops         atomic.Uint64
+	freezes       atomic.Uint64
 }
 
-func NewManager(interfaces []string, maxStream int, store *flow.Store) *Manager {
-	return &Manager{interfaces: interfaces, maxStream: maxStream, store: store, streams: make(map[flow.Key]*streamState), status: Status{Interfaces: interfaces}}
+func NewManager(interfaces []string, prefixes []netip.Prefix, maxStream int, store *flow.Store, matcher *nftset.Matcher) *Manager {
+	return &Manager{interfaces: interfaces, prefixes: prefixes, maxStream: maxStream, store: store, matcher: matcher, streams: make(map[flow.Key]*streamState), packetStreams: make(map[flow.Key]*packetState), status: Status{Interfaces: interfaces}}
 }
 
 func (m *Manager) Start() error {
@@ -48,11 +72,52 @@ func (m *Manager) Start() error {
 	if m.cancel != nil {
 		return nil
 	}
+	filter, err := transportFilter()
+	if err != nil {
+		return fmt.Errorf("assemble BPF filter: %w", err)
+	}
+	type source struct {
+		name   string
+		handle *afpacket.TPacket
+	}
+	var sources []source
+	errorsByInterface := make(map[string]string)
+	for _, name := range m.interfaces {
+		h, openErr := afpacket.NewTPacket(afpacket.OptInterface(name), afpacket.OptFrameSize(2048), afpacket.OptBlockSize(1<<20), afpacket.OptNumBlocks(4), afpacket.OptPollTimeout(250*time.Millisecond), afpacket.OptTPacketVersion(afpacket.TPacketVersion3))
+		if openErr == nil {
+			openErr = h.SetBPF(filter)
+		}
+		if openErr != nil {
+			if h != nil {
+				h.Close()
+			}
+			errorsByInterface[name] = openErr.Error()
+			continue
+		}
+		sources = append(sources, source{name, h})
+	}
+	if len(sources) == 0 {
+		m.status = Status{Interfaces: m.interfaces, Errors: errorsByInterface}
+		return fmt.Errorf("no capture interface could be opened")
+	}
+	if len(m.prefixes) == 0 {
+		m.prefixes = discoverPrefixes(m.interfaces)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	m.status = Status{Capturing: true, Interfaces: m.interfaces, StartedAt: time.Now().UnixMilli()}
-	for _, name := range m.interfaces {
-		go m.capture(ctx, name)
+	m.generation++
+	generation := m.generation
+	m.active = len(sources)
+	m.received.Store(0)
+	m.drops.Store(0)
+	m.freezes.Store(0)
+	m.status = Status{Capturing: true, Interfaces: m.interfaces, LANPrefixes: prefixStrings(m.prefixes), BPFEnabled: true, StartedAt: time.Now().UnixMilli(), Errors: errorsByInterface, NFTSetEnabled: m.matcher != nil && m.matcher.Enabled()}
+	if m.matcher != nil {
+		m.matcher.Refresh(ctx)
+		go m.matcher.Run(ctx)
+	}
+	for _, source := range sources {
+		go m.capture(ctx, generation, source.name, source.handle)
 	}
 	return nil
 }
@@ -65,21 +130,41 @@ func (m *Manager) Stop() {
 	}
 	m.status.Capturing = false
 	m.streams = make(map[flow.Key]*streamState)
+	m.packetStreams = make(map[flow.Key]*packetState)
 	m.mu.Unlock()
 }
-func (m *Manager) Status() Status { m.mu.Lock(); defer m.mu.Unlock(); return m.status }
-
-func (m *Manager) capture(ctx context.Context, name string) {
-	h, err := afpacket.NewTPacket(afpacket.OptInterface(name), afpacket.OptFrameSize(2048), afpacket.OptBlockSize(1<<20), afpacket.OptNumBlocks(4), afpacket.OptPollTimeout(250*time.Millisecond), afpacket.OptTPacketVersion(afpacket.TPacketVersion3))
-	if err != nil {
-		m.setError(fmt.Sprintf("%s: %v", name, err))
-		return
+func (m *Manager) Status() Status {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := m.status
+	result.Interfaces = append([]string(nil), m.status.Interfaces...)
+	result.LANPrefixes = append([]string(nil), m.status.LANPrefixes...)
+	if len(m.status.Errors) > 0 {
+		result.Errors = make(map[string]string, len(m.status.Errors))
+		for name, message := range m.status.Errors {
+			result.Errors[name] = message
+		}
 	}
+	result.Packets, result.Drops, result.QueueFreezes = m.received.Load(), m.drops.Load(), m.freezes.Load()
+	if m.matcher != nil {
+		result.NFTSetErrors = m.matcher.Errors()
+	}
+	return result
+}
+
+func (m *Manager) capture(ctx context.Context, generation uint64, name string, h *afpacket.TPacket) {
 	defer h.Close()
+	defer m.captureFinished(generation)
+	statsTicker := time.NewTicker(time.Second)
+	defer statsTicker.Stop()
+	var lastPackets, lastDrops, lastFreezes uint
 	for {
 		select {
 		case <-ctx.Done():
+			m.collectStats(h, &lastPackets, &lastDrops, &lastFreezes)
 			return
+		case <-statsTicker.C:
+			m.collectStats(h, &lastPackets, &lastDrops, &lastFreezes)
 		default:
 		}
 		packet, _, err := h.ZeroCopyReadPacketData()
@@ -87,31 +172,81 @@ func (m *Manager) capture(ctx context.Context, name string) {
 			if errors.Is(err, afpacket.ErrTimeout) {
 				continue
 			}
-			m.setError(fmt.Sprintf("%s: %v", name, err))
+			m.setError(name, err.Error())
 			return
 		}
 		m.consume(packet)
 	}
 }
 
-func (m *Manager) setError(message string) { m.mu.Lock(); m.status.Error = message; m.mu.Unlock() }
+func (m *Manager) setError(name, message string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.status.Errors == nil {
+		m.status.Errors = make(map[string]string)
+	}
+	m.status.Errors[name] = message
+}
+
+func (m *Manager) captureFinished(generation uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.generation == generation {
+		m.active--
+		if m.active <= 0 {
+			m.status.Capturing = false
+			m.cancel = nil
+		}
+	}
+}
+
+func (m *Manager) collectStats(h *afpacket.TPacket, lastPackets, lastDrops, lastFreezes *uint) {
+	_, stats, err := h.SocketStats()
+	if err != nil {
+		return
+	}
+	packets, drops, freezes := stats.Packets(), stats.Drops(), stats.QueueFreezes()
+	m.received.Add(uint64(packets - *lastPackets))
+	m.drops.Add(uint64(drops - *lastDrops))
+	m.freezes.Add(uint64(freezes - *lastFreezes))
+	*lastPackets, *lastDrops, *lastFreezes = packets, drops, freezes
+}
 
 func (m *Manager) consume(packet []byte) {
 	src, dst, proto, sport, dport, seq, flags, payload, ok := decode(packet)
-	if !ok || !isPrivate(src) {
+	if !ok || !m.isLANSource(src) {
 		return
 	}
 	key := flow.Key{Source: netip.AddrPortFrom(src, sport), Destination: netip.AddrPortFrom(dst, dport), Network: proto}
+	m.mu.Lock()
+	m.packets++
+	if m.packets%512 == 0 {
+		m.pruneStreamsLocked(time.Now())
+	}
+	m.mu.Unlock()
 	protocol, domain := "", ""
 	if proto == 17 {
-		protocol, domain, _ = sniff.Packet(sport, dport, payload)
+		if dport == 443 {
+			m.mu.Lock()
+			state := m.packetStreams[key]
+			if state == nil {
+				state = &packetState{}
+				m.packetStreams[key] = state
+			}
+			if !state.done {
+				protocol, domain, _ = sniff.Packet(sport, dport, payload, &state.sniff)
+				if domain != "" {
+					state.done = true
+				}
+			}
+			state.touched = time.Now()
+			m.mu.Unlock()
+		} else {
+			protocol, domain, _ = sniff.Packet(sport, dport, payload, nil)
+		}
 	}
 	if proto == 6 && len(payload) > 0 {
 		m.mu.Lock()
-		m.packets++
-		if m.packets%512 == 0 {
-			m.pruneStreamsLocked(time.Now())
-		}
 		state := m.streams[key]
 		if state == nil {
 			state = &streamState{}
@@ -127,7 +262,7 @@ func (m *Manager) consume(packet []byte) {
 				state.next = seq + uint32(len(payload))
 			}
 			if dport == 53 && len(state.data) > 2 {
-				protocol, domain, _ = sniff.Packet(sport, dport, state.data[2:])
+				protocol, domain, _ = sniff.Packet(sport, dport, state.data[2:], nil)
 			} else {
 				protocol, domain, _ = sniff.Stream(state.data)
 			}
@@ -140,7 +275,8 @@ func (m *Manager) consume(packet []byte) {
 		m.mu.Unlock()
 	}
 	_ = flags
-	m.store.Observe(key, len(packet), protocol, domain)
+	proxySetMatch := m.matcher != nil && m.matcher.Contains(dst)
+	m.store.Observe(key, len(packet), protocol, domain, proxySetMatch)
 }
 
 func (m *Manager) pruneStreamsLocked(now time.Time) {
@@ -148,6 +284,11 @@ func (m *Manager) pruneStreamsLocked(now time.Time) {
 	for key, state := range m.streams {
 		if state.touched.Before(cutoff) {
 			delete(m.streams, key)
+		}
+	}
+	for key, state := range m.packetStreams {
+		if state.touched.Before(cutoff) {
+			delete(m.packetStreams, key)
 		}
 	}
 	for len(m.streams) > 8192 {
@@ -160,9 +301,74 @@ func (m *Manager) pruneStreamsLocked(now time.Time) {
 		}
 		delete(m.streams, oldestKey)
 	}
+	for len(m.packetStreams) > 8192 {
+		for key := range m.packetStreams {
+			delete(m.packetStreams, key)
+			break
+		}
+	}
 }
 
-func isPrivate(ip netip.Addr) bool { return ip.IsPrivate() || ip.IsLinkLocalUnicast() }
+func (m *Manager) isLANSource(ip netip.Addr) bool {
+	for _, prefix := range m.prefixes {
+		if prefix.Contains(ip) {
+			return true
+		}
+	}
+	return len(m.prefixes) == 0 && (ip.IsPrivate() || ip.IsLinkLocalUnicast())
+}
+
+func discoverPrefixes(names []string) []netip.Prefix {
+	seen := make(map[netip.Prefix]struct{})
+	var result []netip.Prefix
+	for _, name := range names {
+		iface, err := net.InterfaceByName(name)
+		if err != nil {
+			continue
+		}
+		addresses, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			prefix, err := netip.ParsePrefix(address.String())
+			if err != nil || prefix.Addr().IsLoopback() {
+				continue
+			}
+			prefix = prefix.Masked()
+			if _, ok := seen[prefix]; ok {
+				continue
+			}
+			seen[prefix] = struct{}{}
+			result = append(result, prefix)
+		}
+	}
+	return result
+}
+
+func prefixStrings(prefixes []netip.Prefix) []string {
+	result := make([]string, len(prefixes))
+	for i, prefix := range prefixes {
+		result[i] = prefix.String()
+	}
+	return result
+}
+
+func ParsePrefixes(value string) ([]netip.Prefix, error) {
+	var result []netip.Prefix
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(item)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LAN prefix %q: %w", item, err)
+		}
+		result = append(result, prefix.Masked())
+	}
+	return result, nil
+}
 
 func decode(b []byte) (src, dst netip.Addr, proto uint8, sport, dport uint16, seq uint32, flags uint8, payload []byte, ok bool) {
 	if len(b) < 14 {

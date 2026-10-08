@@ -18,13 +18,23 @@ func Stream(data []byte) (protocol, domain string, err error) {
 	return http(data)
 }
 
-func Packet(srcPort, dstPort uint16, data []byte) (protocol, domain string, err error) {
+func Packet(srcPort, dstPort uint16, data []byte, state *PacketState) (protocol, domain string, err error) {
 	if srcPort == 53 || dstPort == 53 {
 		domain, err = dns(data)
 		return "dns", domain, err
 	}
 	if srcPort == 443 || dstPort == 443 {
-		return "quic", "", nil
+		if state == nil {
+			state = &PacketState{}
+		}
+		domain, err = quicClientHello(data, state)
+		if errors.Is(err, ErrNeedMore) {
+			return "quic", "", nil
+		}
+		if err != nil {
+			return "quic", "", nil
+		}
+		return "quic", domain, nil
 	}
 	if srcPort == 123 || dstPort == 123 {
 		return "ntp", "", nil
