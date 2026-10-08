@@ -111,6 +111,9 @@ func quicClientHello(packet []byte, state *PacketState) (string, error) {
 	}
 	aadEnd := headerLen + pnLen
 	ciphertextEnd := headerLen + int(packetLen)
+	if ciphertextEnd < aadEnd || ciphertextEnd-aadEnd < 16 {
+		return "", errors.New("invalid QUIC Initial payload length")
+	}
 	key := quicHKDFLabel(secret, keyLabel, 16)
 	iv := quicHKDFLabel(secret, ivLabel, 12)
 	aead, err := newQUICAEAD(key)
