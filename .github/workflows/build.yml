@@ -29,7 +29,7 @@ jobs:
         working-directory: web
       - run: go test ./cmd/... ./internal/... ./web
       - run: go vet ./cmd/... ./internal/... ./web
-      - run: sh -n package/openwrt-sniff/files/etc/init.d/openwrt-sniff
+      - run: sh -n package/openwrt-sniff/files/etc/init.d/sniffd
       - run: bash -n build.sh
       - run: sh -n install.sh
       - run: bash tests/test_install.sh

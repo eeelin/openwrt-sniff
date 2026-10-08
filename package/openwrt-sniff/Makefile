@@ -20,7 +20,7 @@ define Package/openwrt-sniff/description
 endef
 
 define Package/openwrt-sniff/conffiles
-/etc/config/openwrt-sniff
+/etc/config/sniffd
 endef
 
 define Build/Compile
@@ -28,12 +28,25 @@ endef
 
 define Package/openwrt-sniff/install
 	$(INSTALL_DIR) $(1)/usr/bin
-	$(INSTALL_BIN) ./files/usr/bin/openwrt-sniff $(1)/usr/bin/openwrt-sniff
+	$(INSTALL_BIN) ./files/usr/bin/openwrt-sniff $(1)/usr/bin/sniffd
 	$(INSTALL_DIR) $(1)/etc/init.d
-	$(INSTALL_BIN) ./files/etc/init.d/openwrt-sniff $(1)/etc/init.d/openwrt-sniff
+	$(INSTALL_BIN) ./files/etc/init.d/sniffd $(1)/etc/init.d/sniffd
 	$(INSTALL_DIR) $(1)/etc/config
-	$(INSTALL_CONF) ./files/etc/config/openwrt-sniff $(1)/etc/config/openwrt-sniff
+	$(INSTALL_CONF) ./files/etc/config/sniffd $(1)/etc/config/sniffd
+endef
+
+define Package/openwrt-sniff/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] && exit 0
+if [ -f /etc/config/openwrt-sniff ]; then
+	cp /etc/config/openwrt-sniff /etc/config/sniffd
+fi
+if [ -x /etc/init.d/openwrt-sniff ]; then
+	/etc/init.d/openwrt-sniff disable >/dev/null 2>&1 || true
+	/etc/init.d/openwrt-sniff stop >/dev/null 2>&1 || true
+	rm -f /etc/init.d/openwrt-sniff
+fi
+exit 0
 endef
 
 $(eval $(call BuildPackage,openwrt-sniff))
-

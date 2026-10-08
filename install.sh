@@ -84,9 +84,9 @@ install_package() {
 }
 
 finish_install() {
-	if [ "$START_SERVICE" = 1 ] && [ -x /etc/init.d/openwrt-sniff ]; then
-		/etc/init.d/openwrt-sniff enable
-		/etc/init.d/openwrt-sniff restart
+	if [ "$START_SERVICE" = 1 ] && [ -x /etc/init.d/sniffd ]; then
+		/etc/init.d/sniffd enable
+		/etc/init.d/sniffd restart
 	fi
 	log 'installation complete; dashboard: http://<router-lan-ip>:8088'
 }

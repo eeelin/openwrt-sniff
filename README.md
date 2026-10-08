@@ -57,12 +57,12 @@ The installer detects `apk`/`opkg` and x86-64/aarch64, verifies release
 checksums, enables the service, and restarts it.
 
 ```sh
-/etc/init.d/openwrt-sniff enable
-/etc/init.d/openwrt-sniff start
-logread -e openwrt-sniff
+/etc/init.d/sniffd enable
+/etc/init.d/sniffd start
+logread -e sniffd
 ```
 
-Configuration is stored in `/etc/config/openwrt-sniff`. The default dashboard
+Configuration is stored in `/etc/config/sniffd`. The default dashboard
 listens on port 8088 and capture remains inactive until requested by the UI.
 
 The build matrix follows `eeelin/openwrt-trafix`: OpenWrt 22.03.5 and 25.12.5,
