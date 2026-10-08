@@ -5,14 +5,17 @@ of LAN packets with Linux AF_PACKET, keeps a short in-memory flow window, and
 serves a React dashboard from the same Go binary. It does not add TPROXY,
 NFQUEUE, or forwarding rules.
 
-## Current v0.1 scope
+## Current P0 scope
 
 - IPv4 and basic IPv6 TCP/UDP decoding
-- DNS query names, HTTP Host, and TLS ClientHello SNI
-- QUIC and NTP protocol labels (QUIC SNI is planned)
+- DNS query names, HTTP Host, TLS ClientHello SNI, and QUIC Initial SNI
+- classic socket BPF filtering before packets enter userspace
 - bounded TCP prefix reassembly (16 KiB per flow by default)
 - live WebSocket updates with no persistent storage
 - capture starts and stops from the web page
+- automatic LAN prefix discovery and optional explicit IPv4/IPv6 prefixes
+- AF_PACKET packet-drop/queue-freeze counters and per-interface capture errors
+- optional nftables-set matching to label destinations handled by sing-box
 - OpenWrt procd/UCI packaging
 
 The observer records LAN-originated flows, including traffic later intercepted
@@ -65,6 +68,23 @@ logread -e sniffd
 Configuration is stored in `/etc/config/sniffd`. The default dashboard
 listens on port 8088 and capture remains inactive until requested by the UI.
 
+By default, LAN prefixes are discovered from each configured capture interface.
+They can be overridden, and dnsmasq-populated nftables sets can be shown as
+`代理集合` in the flow table:
+
+```uci
+config main 'main'
+	list interface 'br-lan'
+	list lan_prefix '192.168.1.0/24'
+	list lan_prefix 'fd00:1234::/64'
+	list nft_set 'inet:fw4:singbox_proxy4'
+	list nft_set 'inet:fw4:singbox_proxy6'
+```
+
+The nft set syntax is `family:table:set`. Set contents are read every five
+seconds using `nft -j`; sniffd never modifies nftables rules or sets. Apply UCI
+changes with `/etc/init.d/sniffd restart`.
+
 The build matrix follows `eeelin/openwrt-trafix`: OpenWrt 22.03.5 and 25.12.5,
 each for x86-64 and rockchip/armv8. Build with an SDK using:
 
@@ -79,3 +99,9 @@ OpenWrt 22.03 emits an `.ipk`; OpenWrt 25.12 emits an `.apk`.
 The dashboard exposes observed destinations and domain names. Keep port 8088
 restricted to trusted LAN zones. Authentication and TLS termination are not part
 of v0.1; use an authenticated reverse proxy if untrusted clients can reach it.
+
+## Attribution
+
+The QUIC Initial decoding in `internal/sniff/quic.go` is adapted from
+[SagerNet/sing-box](https://github.com/SagerNet/sing-box), licensed under
+GPL-3.0-or-later. See `THIRD_PARTY_NOTICES.md` for details.

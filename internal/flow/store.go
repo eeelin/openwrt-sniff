@@ -48,7 +48,7 @@ func NewStore(max int, window time.Duration) *Store {
 	return &Store{items: make(map[Key]*Flow), max: max, window: window, subs: make(map[chan Event]struct{})}
 }
 
-func (s *Store) Observe(key Key, size int, protocol, domain string) Flow {
+func (s *Store) Observe(key Key, size int, protocol, domain string, proxySetMatch bool) Flow {
 	now := time.Now().UnixMilli()
 	s.mu.Lock()
 	f, ok := s.items[key]
@@ -74,6 +74,7 @@ func (s *Store) Observe(key Key, size int, protocol, domain string) Flow {
 	if f.Protocol != "" {
 		f.Classification = "identified"
 	}
+	f.ProxySetMatch = f.ProxySetMatch || proxySetMatch
 	copyFlow := *f
 	s.pruneLocked(now)
 	s.publishLocked(Event{Type: eventType, Flow: copyFlow})
