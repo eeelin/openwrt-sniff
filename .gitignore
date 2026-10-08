@@ -1,0 +1,5 @@
+.work/
+/dist/
+web/node_modules/
+web/*.tsbuildinfo
+package/openwrt-sniff/files/usr/bin/openwrt-sniff

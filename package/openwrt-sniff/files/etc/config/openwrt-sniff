@@ -1,0 +1,8 @@
+config main 'main'
+	option enabled '1'
+	option listen '0.0.0.0:8088'
+	list interface 'br-lan'
+	option window '5m'
+	option max_flows '4096'
+	option max_stream_bytes '16384'
+

@@ -1,0 +1,84 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24.9'
+          cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: go test ./cmd/... ./internal/... ./web
+      - run: go vet ./cmd/... ./internal/... ./web
+      - run: sh -n package/openwrt-sniff/files/etc/init.d/openwrt-sniff
+      - run: bash -n build.sh
+      - run: sh -n install.sh
+      - run: bash tests/test_install.sh
+
+  prepare-matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: matrix
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          with open('.github/openwrt-sdk-matrix.json') as f:
+              print('matrix=' + json.dumps(json.load(f), separators=(',', ':')))
+          PY
+
+  package:
+    needs: [test, prepare-matrix]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24.9'
+          cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y build-essential gawk libncurses-dev file rsync unzip wget zlib1g-dev python3-pyelftools zstd
+      - uses: actions/cache@v4
+        with:
+          path: .work/downloads
+          key: openwrt-sdk-${{ matrix.name }}
+      - name: Build OpenWrt package
+        env:
+          SDK_URL: ${{ matrix.sdk_url }}
+          GOARCH: ${{ matrix.goarch }}
+          ARTIFACT_DIR: ${{ github.workspace }}/dist/${{ matrix.name }}
+        run: ./build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}/*
+          if-no-files-found: error
