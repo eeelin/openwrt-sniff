@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SDK_URL="${SDK_URL:-}"
 SDK_DIR="${SDK_DIR:-}"
 GOARCH="${GOARCH:-}"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.2.0}"
 WORK_DIR="${WORK_DIR:-$ROOT_DIR/.work}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$ROOT_DIR/dist}"
 
@@ -35,4 +35,3 @@ find "$ARTIFACT_DIR" -maxdepth 1 -type f -delete
 find "$SDK_DIR/bin/packages" -type f \( -name 'openwrt-sniff_*.ipk' -o -name 'openwrt-sniff-*.apk' \) -exec cp {} "$ARTIFACT_DIR/" \;
 (cd "$ARTIFACT_DIR" && sha256sum ./*.ipk ./*.apk 2>/dev/null > sha256sums.txt || true)
 find "$ARTIFACT_DIR" -maxdepth 1 -type f -print
-
