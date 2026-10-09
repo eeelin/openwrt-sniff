@@ -72,3 +72,20 @@ func TestDebugRecorderMemoryLimit(t *testing.T) {
 		t.Fatalf("unexpected bounded status: %+v", status)
 	}
 }
+
+func TestDebugRecorderExpiresUndownloadedCapture(t *testing.T) {
+	var recorder debugRecorder
+	if err := recorder.Start(DebugCaptureOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	packet := make([]byte, 64)
+	recorder.Record(packet, gopacket.CaptureInfo{})
+	recorder.Stop()
+	recorder.mu.Lock()
+	recorder.readyUntil = time.Now().Add(-time.Second)
+	recorder.mu.Unlock()
+	status := recorder.Status()
+	if status.Ready || status.Bytes != 0 || status.Packets != 0 {
+		t.Fatalf("expired capture was retained: %+v", status)
+	}
+}

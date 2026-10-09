@@ -89,6 +89,11 @@ finish_install() {
 		/etc/init.d/sniffd restart
 	fi
 	log 'installation complete; dashboard: http://<router-lan-ip>:8088'
+	if [ "$START_SERVICE" = 1 ] && [ -r /etc/sniffd.token ]; then
+		log "login token: $(cat /etc/sniffd.token)"
+	else
+		log 'after starting sniffd, show the login token with: cat /etc/sniffd.token'
+	fi
 }
 
 if [ -n "$LOCAL_PACKAGE" ]; then

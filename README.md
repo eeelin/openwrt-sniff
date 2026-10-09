@@ -47,7 +47,7 @@ The diagnostic capture API is:
 ```text
 POST /api/v1/debug/capture/start
 POST /api/v1/debug/capture/stop
-GET  /api/v1/debug/capture.pcap
+POST /api/v1/debug/capture.pcap
 ```
 
 The start request optionally accepts `source`, `destination`, and `port` in a
@@ -93,12 +93,22 @@ curl -fsSL https://raw.githubusercontent.com/eeelin/openwrt-sniff/main/install.s
 ```
 
 The installer detects `apk`/`opkg` and x86-64/aarch64, verifies release
-checksums, enables the service, and restarts it.
+checksums, enables the service, restarts it, and prints the generated dashboard
+login token. The token is stored in `/etc/sniffd.token` with mode `0600`.
 
 ```sh
 /etc/init.d/sniffd enable
 /etc/init.d/sniffd start
 logread -e sniffd
+cat /etc/sniffd.token
+```
+
+To rotate the dashboard token and invalidate every existing session:
+
+```sh
+rm /etc/sniffd.token
+/etc/init.d/sniffd restart
+cat /etc/sniffd.token
 ```
 
 Configuration is stored in `/etc/config/sniffd`. The default dashboard
@@ -132,11 +142,17 @@ OpenWrt 22.03 emits an `.ipk`; OpenWrt 25.12 emits an `.apk`.
 
 ## Security
 
-The dashboard exposes observed destinations and domain names. Keep port 8088
-restricted to trusted LAN zones. Authentication and TLS termination are not part
-of v0.1; use an authenticated reverse proxy if untrusted clients can reach it.
-Diagnostic PCAP files contain packet payloads, so enable diagnostic capture only
-when needed and do not expose its API to untrusted clients.
+The dashboard and every capture API require token authentication. A successful
+login creates a signed, 12-hour `HttpOnly` and `SameSite=Strict` session cookie;
+the token is not retained by the browser. Login attempts are rate limited,
+state-changing requests are restricted to the dashboard origin, and changing
+the token invalidates all existing sessions.
+
+Keep port 8088 restricted to trusted LAN zones. HTTP does not protect the token
+from other devices able to observe LAN traffic, so use TLS termination at a
+trusted reverse proxy when the network is not trusted. Diagnostic PCAP files
+contain packet payloads; they are held only in memory, removed after download,
+and expire five minutes after capture completes.
 
 ## Attribution
 
