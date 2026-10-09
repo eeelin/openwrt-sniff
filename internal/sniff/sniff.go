@@ -132,17 +132,37 @@ func http(data []byte) (string, string, error) {
 }
 
 func tls(data []byte) (string, string, error) {
-	if len(data) < 5 {
-		return "", "", ErrNeedMore
+	var handshake []byte
+	for offset := 0; ; {
+		if len(data)-offset < 5 {
+			return "", "", ErrNeedMore
+		}
+		if data[offset] != 0x16 {
+			return "", "", errors.New("not a TLS handshake record")
+		}
+		recordLen := int(binary.BigEndian.Uint16(data[offset+3 : offset+5]))
+		if len(data)-offset < 5+recordLen {
+			return "", "", ErrNeedMore
+		}
+		handshake = append(handshake, data[offset+5:offset+5+recordLen]...)
+		if len(handshake) >= 4 {
+			handshakeLen := int(handshake[1])<<16 | int(handshake[2])<<8 | int(handshake[3])
+			if len(handshake) >= 4+handshakeLen {
+				return tlsClientHello(handshake[:4+handshakeLen])
+			}
+		}
+		offset += 5 + recordLen
+		if offset == len(data) {
+			return "", "", ErrNeedMore
+		}
 	}
-	recordLen := int(binary.BigEndian.Uint16(data[3:5]))
-	if len(data) < 5+recordLen {
-		return "", "", ErrNeedMore
-	}
-	if len(data) < 44 || data[5] != 1 {
+}
+
+func tlsClientHello(data []byte) (string, string, error) {
+	if len(data) < 39 || data[0] != 1 {
 		return "", "", errors.New("not client hello")
 	}
-	p := 43
+	p := 38
 	if p >= len(data) {
 		return "", "", ErrNeedMore
 	}

@@ -39,11 +39,65 @@ func TestTCPDiagnostics(t *testing.T) {
 	}
 }
 
+func TestTCPOutOfOrderReassembly(t *testing.T) {
+	store := flow.NewStore(16, time.Minute)
+	manager := NewManager(nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, 1024, store, nil)
+	source := [4]byte{192, 0, 2, 10}
+	destination := [4]byte{198, 51, 100, 20}
+	request := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	manager.consume(tcpFrame(source, destination, 50000, 443, 1000, 0x02, nil))
+	manager.consume(tcpFrame(source, destination, 50000, 443, 1011, 0x18, request[10:]))
+	if got := store.Snapshot()[0]; got.SniffState != "sequence_gap" {
+		t.Fatalf("future segment did not report a gap: %+v", got)
+	}
+	manager.consume(tcpFrame(source, destination, 50000, 443, 1001, 0x18, request[:10]))
+	got := store.Snapshot()[0]
+	if got.Protocol != "http" || got.Domain != "example.com" || got.SniffState != "identified" {
+		t.Fatalf("out-of-order request was not reassembled: %+v", got)
+	}
+}
+
+func TestTCPConnectionReuseAndClose(t *testing.T) {
+	store := flow.NewStore(16, time.Minute)
+	manager := NewManager(nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, 1024, store, nil)
+	source := [4]byte{192, 0, 2, 10}
+	destination := [4]byte{198, 51, 100, 20}
+	manager.consume(tcpFrame(source, destination, 50000, 80, 1000, 0x02, nil))
+	manager.consume(tcpFrame(source, destination, 50000, 80, 1001, 0x18, []byte("GET / HTTP/1.1\r\nHost: old.example\r\n\r\n")))
+	first := store.Snapshot()[0]
+	manager.consume(tcpFrame(source, destination, 50000, 80, 1042, 0x11, nil))
+	if len(manager.streams) != 0 {
+		t.Fatal("closed TCP stream state was retained")
+	}
+
+	manager.consume(tcpFrame(source, destination, 50000, 80, 9000, 0x02, nil))
+	second := store.Snapshot()[0]
+	if second.ID == first.ID || second.Protocol != "" || second.Domain != "" {
+		t.Fatalf("reused tuple retained the previous connection: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestEthernetPaddingBeforePayloadDoesNotPoisonStream(t *testing.T) {
+	store := flow.NewStore(16, time.Minute)
+	manager := NewManager(nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, 1024, store, nil)
+	source := [4]byte{192, 0, 2, 10}
+	destination := [4]byte{198, 51, 100, 20}
+	manager.consume(tcpFrame(source, destination, 50000, 443, 1000, 0x02, nil))
+	paddedACK := append(tcpFrame(source, destination, 50000, 443, 1001, 0x10, nil), make([]byte, 6)...)
+	manager.consume(paddedACK)
+	manager.consume(tcpFrame(source, destination, 50000, 443, 1001, 0x18, []byte("GET / HTTP/1.1\r\nHost: www.baidu.com\r\n\r\n")))
+	got := store.Snapshot()[0]
+	if got.Protocol != "http" || got.Domain != "www.baidu.com" {
+		t.Fatalf("link-layer padding poisoned stream prefix: %+v", got)
+	}
+}
+
 func tcpFrame(source, destination [4]byte, sourcePort, destinationPort uint16, sequence uint32, flags byte, payload []byte) []byte {
 	packet := make([]byte, 14+20+20+len(payload))
 	packet[12], packet[13] = 0x08, 0x00
 	ip := packet[14:]
 	ip[0], ip[9] = 0x45, 6
+	binary.BigEndian.PutUint16(ip[2:4], uint16(20+20+len(payload)))
 	copy(ip[12:16], source[:])
 	copy(ip[16:20], destination[:])
 	tcp := ip[20:]

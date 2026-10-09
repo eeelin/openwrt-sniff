@@ -9,6 +9,19 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
+func TestQUICFragmentOverlapAndGap(t *testing.T) {
+	fragments := addQUICFragment(nil, quicFragment{offset: 4, payload: []byte("efgh")})
+	fragments = addQUICFragment(fragments, quicFragment{offset: 0, payload: []byte("abcdef")})
+	fragments = addQUICFragment(fragments, quicFragment{offset: 8, payload: []byte("ij")})
+	if got := string(joinQUICFragments(fragments)); got != "abcdefghij" {
+		t.Fatalf("joined fragments = %q", got)
+	}
+	fragments = addQUICFragment(fragments, quicFragment{offset: 12, payload: []byte("mn")})
+	if got := string(joinQUICFragments(fragments)); got != "abcdefghij" {
+		t.Fatalf("join crossed a gap: %q", got)
+	}
+}
+
 func TestQUICClientHelloSNI(t *testing.T) {
 	packet := makeQUICInitial(t, "quic.example.com")
 	domain, err := quicClientHello(packet, &PacketState{})

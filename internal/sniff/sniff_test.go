@@ -125,7 +125,26 @@ func FuzzPacketNoPanic(f *testing.F) {
 }
 
 func TestTLSClientHelloSNI(t *testing.T) {
-	name := []byte("example.com")
+	record := tlsClientHelloRecord("example.com")
+	protocol, domain, err := Stream(record)
+	if err != nil || protocol != "tls" || domain != "example.com" {
+		t.Fatalf("got %q %q %v", protocol, domain, err)
+	}
+}
+
+func TestTLSClientHelloAcrossRecords(t *testing.T) {
+	handshake := tlsClientHelloRecord("split.example")[5:]
+	split := 24
+	record := tlsRecord(handshake[:split])
+	record = append(record, tlsRecord(handshake[split:])...)
+	protocol, domain, err := Stream(record)
+	if err != nil || protocol != "tls" || domain != "split.example" {
+		t.Fatalf("got %q %q %v", protocol, domain, err)
+	}
+}
+
+func tlsClientHelloRecord(host string) []byte {
+	name := []byte(host)
 	sni := make([]byte, 5+len(name))
 	binary.BigEndian.PutUint16(sni[0:2], uint16(3+len(name)))
 	sni[2] = 0
@@ -142,8 +161,10 @@ func TestTLSClientHelloSNI(t *testing.T) {
 	handshake = append(handshake, body...)
 	record := []byte{0x16, 0x03, 0x01, byte(len(handshake) >> 8), byte(len(handshake))}
 	record = append(record, handshake...)
-	protocol, domain, err := Stream(record)
-	if err != nil || protocol != "tls" || domain != "example.com" {
-		t.Fatalf("got %q %q %v", protocol, domain, err)
-	}
+	return record
+}
+
+func tlsRecord(payload []byte) []byte {
+	record := []byte{0x16, 0x03, 0x03, byte(len(payload) >> 8), byte(len(payload))}
+	return append(record, payload...)
 }
