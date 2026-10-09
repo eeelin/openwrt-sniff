@@ -20,6 +20,7 @@ type Flow struct {
 	Source          string `json:"source"`
 	Destination     string `json:"destination"`
 	Network         string `json:"network"`
+	ConnectionState string `json:"connection_state,omitempty"`
 	Direction       string `json:"direction"`
 	InternalType    string `json:"internal_type,omitempty"`
 	Protocol        string `json:"protocol,omitempty"`
@@ -69,7 +70,7 @@ func NewStore(max int, window time.Duration) *Store {
 	return &Store{items: make(map[Key]*Flow), max: max, window: window, subs: make(map[chan Event]struct{})}
 }
 
-func (s *Store) Observe(key Key, size int, protocol, domain, direction, internalType string, forward, initiatorKnown, proxySetMatch bool, diagnostic Diagnostic) Flow {
+func (s *Store) Observe(key Key, size int, protocol, domain, direction, internalType, connectionState string, forward, initiatorKnown, proxySetMatch bool, diagnostic Diagnostic) Flow {
 	now := time.Now().UnixMilli()
 	s.mu.Lock()
 	f, ok := s.items[key]
@@ -109,6 +110,9 @@ func (s *Store) Observe(key Key, size int, protocol, domain, direction, internal
 	}
 	if protocol != "" {
 		f.Protocol = protocol
+	}
+	if connectionState != "" {
+		f.ConnectionState = connectionState
 	}
 	if domain != "" {
 		f.Domain = domain

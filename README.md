@@ -15,7 +15,7 @@ NFQUEUE, or forwarding rules.
 - direction-aware flows for inbound, outbound, and LAN communication; LAN flows
   distinguish unicast, multicast, and broadcast traffic
 - bidirectional TCP connection correlation with separate sent/received packet
-  and byte counters
+  and byte counters, active/closed lifecycle state, and dashboard filtering
 - capture starts and stops from the web page
 - automatic LAN prefix discovery and optional explicit IPv4/IPv6 prefixes
 - AF_PACKET packet-drop/queue-freeze counters and per-interface capture errors
