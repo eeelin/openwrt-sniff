@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SDK_URL="${SDK_URL:-}"
 SDK_DIR="${SDK_DIR:-}"
 GOARCH="${GOARCH:-}"
-VERSION="${VERSION:-0.7.0}"
+VERSION="${VERSION:-0.8.0}"
 WORK_DIR="${WORK_DIR:-$ROOT_DIR/.work}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$ROOT_DIR/dist}"
 
