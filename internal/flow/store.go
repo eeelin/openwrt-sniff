@@ -114,6 +114,9 @@ func (s *Store) pruneLocked(now int64) {
 	for len(s.order) > 0 && (len(s.items) > s.max || s.items[s.order[0]] == nil || s.items[s.order[0]].LastSeen < cutoff) {
 		key := s.order[0]
 		s.order = s.order[1:]
+		if existing := s.items[key]; existing != nil {
+			s.publishLocked(Event{Type: "flow.close", Flow: *existing})
+		}
 		delete(s.items, key)
 	}
 }
@@ -139,7 +142,22 @@ func (s *Store) Snapshot() []Flow {
 	return result
 }
 
-func (s *Store) Clear()          { s.mu.Lock(); s.items = make(map[Key]*Flow); s.order = nil; s.mu.Unlock() }
+func (s *Store) Clear() { s.mu.Lock(); s.items = make(map[Key]*Flow); s.order = nil; s.mu.Unlock() }
+func (s *Store) Reset(key Key) {
+	s.mu.Lock()
+	if existing := s.items[key]; existing != nil {
+		s.publishLocked(Event{Type: "flow.close", Flow: *existing})
+	}
+	delete(s.items, key)
+	filtered := s.order[:0]
+	for _, existing := range s.order {
+		if existing != key {
+			filtered = append(filtered, existing)
+		}
+	}
+	s.order = filtered
+	s.mu.Unlock()
+}
 func (s *Store) Dropped() uint64 { return s.dropped.Load() }
 func (s *Store) Subscribe() (<-chan Event, func()) {
 	ch := make(chan Event, 128)

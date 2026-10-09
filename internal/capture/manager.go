@@ -21,6 +21,8 @@ import (
 type streamState struct {
 	next            uint32
 	data            []byte
+	pending         []tcpSegment
+	pendingBytes    int
 	touched         time.Time
 	done            bool
 	initialized     bool
@@ -31,11 +33,15 @@ type streamState struct {
 	state           string
 	lastError       string
 	expectedBytes   int
+	synSequence     uint32
+}
+type tcpSegment struct {
+	sequence uint32
+	payload  []byte
 }
 type packetState struct {
 	sniff   sniff.PacketState
 	touched time.Time
-	done    bool
 }
 type Status struct {
 	Capturing     bool               `json:"capturing"`
@@ -262,40 +268,51 @@ func (m *Manager) consume(packet []byte) {
 	protocol, domain := "", ""
 	diagnostic := flow.Diagnostic{State: "pending"}
 	if proto == 17 {
-		if dport == 443 {
-			m.mu.Lock()
-			state := m.packetStreams[key]
-			if state == nil {
-				state = &packetState{}
-				m.packetStreams[key] = state
-			}
-			if !state.done {
-				var sniffErr error
-				protocol, domain, sniffErr = sniff.Packet(sport, dport, payload, &state.sniff)
-				diagnostic = packetDiagnostic(protocol, sniffErr)
-				if domain != "" {
-					state.done = true
-				}
-			}
+		var sniffErr error
+		m.mu.Lock()
+		state, retained := m.packetStreams[key]
+		if retained {
+			protocol, domain, sniffErr = sniff.Packet(sport, dport, payload, &state.sniff)
+			diagnostic = packetDiagnostic(protocol, sniffErr)
 			state.touched = time.Now()
+			if domain != "" {
+				delete(m.packetStreams, key)
+			}
 			m.mu.Unlock()
 		} else {
-			var sniffErr error
-			protocol, domain, sniffErr = sniff.Packet(sport, dport, payload, nil)
+			m.mu.Unlock()
+			candidate := &packetState{touched: time.Now()}
+			protocol, domain, sniffErr = sniff.Packet(sport, dport, payload, &candidate.sniff)
 			diagnostic = packetDiagnostic(protocol, sniffErr)
+			if protocol == "quic" && domain == "" {
+				m.mu.Lock()
+				if _, exists := m.packetStreams[key]; !exists {
+					m.packetStreams[key] = candidate
+				}
+				m.mu.Unlock()
+			}
 		}
 	}
 	if proto == 6 {
 		m.mu.Lock()
 		state := m.streams[key]
+		newConnection := flags&0x02 != 0 && flags&0x10 == 0 && (state == nil || !state.synSeen || state.synSequence != seq)
+		if newConnection {
+			delete(m.streams, key)
+			m.store.Reset(key)
+			state = nil
+		}
 		if state == nil {
 			state = &streamState{state: "waiting_for_payload"}
 			m.streams[key] = state
 		}
 		if flags&0x02 != 0 {
 			state.synSeen = true
-			state.initialized = true
-			state.next = seq + 1
+			state.synSequence = seq
+			if !state.initialized {
+				state.initialized = true
+				state.next = seq + 1
+			}
 		}
 		if len(payload) > 0 && !state.done && len(state.data) < m.maxStream {
 			if !state.initialized {
@@ -307,22 +324,15 @@ func (m *Manager) consume(packet []byte) {
 			if flags&0x02 != 0 {
 				payloadSequence++
 			}
-			delta := int32(payloadSequence - state.next)
-			switch {
-			case delta == 0:
-				remaining := m.maxStream - len(state.data)
-				if len(payload) > remaining {
-					payload = payload[:remaining]
-				}
-				state.data = append(state.data, payload...)
-				state.next = payloadSequence + uint32(len(payload))
-			case delta < 0:
+			gap, retransmission := state.add(payloadSequence, payload, m.maxStream)
+			if retransmission {
 				state.retransmissions++
 				m.retransmissions.Add(1)
-			case delta > 0:
+			}
+			if gap > 0 {
 				state.gaps++
 				state.state = "sequence_gap"
-				state.lastError = fmt.Sprintf("missing %d TCP bytes before this segment", delta)
+				state.lastError = fmt.Sprintf("waiting for %d missing TCP bytes", gap)
 				m.sequenceGaps.Add(1)
 			}
 			var sniffErr error
@@ -336,7 +346,9 @@ func (m *Manager) consume(packet []byte) {
 				state.state = "identified"
 				state.lastError = ""
 				state.data = nil
-			} else if state.state != "sequence_gap" {
+			} else if len(state.pending) > 0 {
+				state.state = "sequence_gap"
+			} else {
 				switch {
 				case errors.Is(sniffErr, sniff.ErrNeedMore):
 					state.state = "need_more"
@@ -355,15 +367,85 @@ func (m *Manager) consume(packet []byte) {
 		if len(state.data) >= 5 && state.data[0] == 0x16 {
 			state.expectedBytes = 5 + int(binary.BigEndian.Uint16(state.data[3:5]))
 		}
-		if flags&(0x01|0x04) != 0 && !state.done {
+		closed := flags&(0x01|0x04) != 0
+		if closed && !state.done {
 			state.state = "closed_unidentified"
 		}
 		state.touched = time.Now()
 		diagnostic = flow.Diagnostic{State: state.state, Error: state.lastError, StreamBytes: len(state.data), ExpectedBytes: state.expectedBytes, TCPSYNSeen: state.synSeen, TCPGapPackets: state.gaps, TCPRetransmissions: state.retransmissions}
+		if closed {
+			delete(m.streams, key)
+		}
 		m.mu.Unlock()
 	}
 	proxySetMatch := m.matcher != nil && m.matcher.Contains(dst)
 	m.store.Observe(key, len(packet), protocol, domain, proxySetMatch, diagnostic)
+}
+
+func (s *streamState) add(sequence uint32, payload []byte, limit int) (gap int32, retransmission bool) {
+	if len(payload) == 0 || len(s.data) >= limit {
+		return 0, false
+	}
+	delta := int32(sequence - s.next)
+	if delta < 0 {
+		retransmission = true
+		overlap := int(s.next - sequence)
+		if overlap >= len(payload) {
+			return 0, true
+		}
+		sequence = s.next
+		payload = payload[overlap:]
+		delta = 0
+	}
+	if delta > 0 {
+		remaining := limit - len(s.data) - s.pendingBytes
+		if remaining <= 0 {
+			return delta, false
+		}
+		if len(payload) > remaining {
+			payload = payload[:remaining]
+		}
+		for _, segment := range s.pending {
+			if sequence >= segment.sequence && sequence+uint32(len(payload)) <= segment.sequence+uint32(len(segment.payload)) {
+				return delta, true
+			}
+		}
+		copied := append([]byte(nil), payload...)
+		s.pending = append(s.pending, tcpSegment{sequence: sequence, payload: copied})
+		s.pendingBytes += len(copied)
+		return delta, false
+	}
+	s.append(payload, limit)
+	for {
+		index := -1
+		for i, segment := range s.pending {
+			if int32(segment.sequence-s.next) <= 0 && int32(segment.sequence+uint32(len(segment.payload))-s.next) > 0 {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			break
+		}
+		segment := s.pending[index]
+		s.pending = append(s.pending[:index], s.pending[index+1:]...)
+		s.pendingBytes -= len(segment.payload)
+		overlap := int(s.next - segment.sequence)
+		s.append(segment.payload[overlap:], limit)
+	}
+	return 0, retransmission
+}
+
+func (s *streamState) append(payload []byte, limit int) {
+	remaining := limit - len(s.data)
+	if remaining <= 0 {
+		return
+	}
+	if len(payload) > remaining {
+		payload = payload[:remaining]
+	}
+	s.data = append(s.data, payload...)
+	s.next += uint32(len(payload))
 }
 
 func packetDiagnostic(protocol string, err error) flow.Diagnostic {

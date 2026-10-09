@@ -20,7 +20,7 @@ function App() {
     const scheme=location.protocol==='https:'?'wss':'ws'
     const ws=new WebSocket(`${scheme}://${location.host}/api/v1/events`)
     ws.onopen=()=>setConnected(true); ws.onclose=()=>setConnected(false)
-    ws.onmessage=e=>{ const event=JSON.parse(e.data); if(event.type==='snapshot') setFlows(new Map(event.flows.map((f:Flow)=>[f.id,f]))); else if(event.flow) setFlows(prev=>{const next=new Map(prev);next.set(event.flow.id,event.flow);return next}) }
+    ws.onmessage=e=>{ const event=JSON.parse(e.data); if(event.type==='snapshot') setFlows(new Map(event.flows.map((f:Flow)=>[f.id,f]))); else if(event.flow) setFlows(prev=>{const next=new Map(prev);if(event.type==='flow.close')next.delete(event.flow.id);else next.set(event.flow.id,event.flow);return next}) }
     return()=>ws.close()
   },[])
   const rows=useMemo(()=>Array.from(flows.values()).filter(f=>`${f.source} ${f.destination} ${f.protocol} ${f.domain} ${f.proxy_set_match?'proxy':''}`.toLowerCase().includes(filter.toLowerCase())).sort((a,b)=>b.last_seen-a.last_seen).slice(0,1000),[flows,filter])

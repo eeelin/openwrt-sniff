@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"sort"
 
 	"golang.org/x/crypto/hkdf"
 )
@@ -137,28 +138,13 @@ func quicClientHello(packet []byte, state *PacketState) (string, error) {
 		if fragment.offset+uint64(len(fragment.payload)) > 64*1024 {
 			return "", errors.New("QUIC ClientHello exceeds observation limit")
 		}
-		duplicate := false
-		for _, existing := range state.fragments {
-			if existing.offset == fragment.offset {
-				duplicate = true
-				break
-			}
-		}
-		if !duplicate {
-			state.fragments = append(state.fragments, fragment)
-		}
+		state.fragments = addQUICFragment(state.fragments, fragment)
 	}
 	cryptoData := joinQUICFragments(state.fragments)
 	if len(cryptoData) == 0 {
 		return "", ErrNeedMore
 	}
-	record := make([]byte, 5, 5+len(cryptoData))
-	record[0] = 0x16
-	record[1] = 0x03
-	record[2] = 0x03
-	binary.BigEndian.PutUint16(record[3:5], uint16(len(cryptoData)))
-	record = append(record, cryptoData...)
-	_, domain, err := tls(record)
+	_, domain, err := tlsClientHello(cryptoData)
 	if err != nil {
 		return "", err
 	}
@@ -292,18 +278,44 @@ func skipQUICAck(reader *bytes.Reader, ecn bool) error {
 func joinQUICFragments(fragments []quicFragment) []byte {
 	var result []byte
 	offset := uint64(0)
-	for {
-		found := false
-		for _, fragment := range fragments {
-			if fragment.offset == offset && len(fragment.payload) > 0 {
-				result = append(result, fragment.payload...)
-				offset += uint64(len(fragment.payload))
-				found = true
-				break
-			}
+	for _, fragment := range fragments {
+		if fragment.offset > offset {
+			break
 		}
-		if !found {
-			return result
+		end := fragment.offset + uint64(len(fragment.payload))
+		if end <= offset {
+			continue
+		}
+		start := int(offset - fragment.offset)
+		result = append(result, fragment.payload[start:]...)
+		offset = end
+	}
+	return result
+}
+
+func addQUICFragment(fragments []quicFragment, added quicFragment) []quicFragment {
+	added.payload = append([]byte(nil), added.payload...)
+	fragments = append(fragments, added)
+	sort.Slice(fragments, func(i, j int) bool { return fragments[i].offset < fragments[j].offset })
+	merged := make([]quicFragment, 0, len(fragments))
+	for _, fragment := range fragments {
+		if len(fragment.payload) == 0 {
+			continue
+		}
+		if len(merged) == 0 {
+			merged = append(merged, fragment)
+			continue
+		}
+		last := &merged[len(merged)-1]
+		lastEnd := last.offset + uint64(len(last.payload))
+		if fragment.offset > lastEnd {
+			merged = append(merged, fragment)
+			continue
+		}
+		fragmentEnd := fragment.offset + uint64(len(fragment.payload))
+		if fragmentEnd > lastEnd {
+			last.payload = append(last.payload, fragment.payload[lastEnd-fragment.offset:]...)
 		}
 	}
+	return merged
 }

@@ -25,6 +25,11 @@ protocols are DNS, HTTP, TLS, QUIC, SSH, RDP, STUN, DTLS, NTP, and BitTorrent
 (TCP handshake, UDP tracker, and uTP SYN). Signatures inspect only bounded flow
 prefixes and do not retain payloads after classification.
 
+TCP inspection tracks connection boundaries from SYN/FIN/RST, resets reused
+five-tuples, and performs bounded out-of-order prefix reassembly. TLS
+ClientHello messages may span multiple TLS records, while QUIC CRYPTO fragments
+are joined across packets and overlapping retransmissions.
+
 ## Built-in diagnostics
 
 Each flow reports its protocol inspection state, buffered/expected bytes,
