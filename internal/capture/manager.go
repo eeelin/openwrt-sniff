@@ -574,6 +574,7 @@ func decode(b []byte) (src, dst netip.Addr, proto uint8, sport, dport uint16, se
 		return
 	}
 	off := 14
+	packetEnd := len(b)
 	ether := binary.BigEndian.Uint16(b[12:14])
 	if ether == 0x8100 || ether == 0x88a8 {
 		if len(b) < 18 {
@@ -588,9 +589,15 @@ func decode(b []byte) (src, dst netip.Addr, proto uint8, sport, dport uint16, se
 			return
 		}
 		ihl := int(b[off]&15) * 4
-		if ihl < 20 || len(b) < off+ihl {
+		totalLength := int(binary.BigEndian.Uint16(b[off+2 : off+4]))
+		if ihl < 20 || totalLength < ihl || len(b) < off+totalLength {
 			return
 		}
+		fragment := binary.BigEndian.Uint16(b[off+6 : off+8])
+		if fragment&0x3fff != 0 {
+			return
+		}
+		packetEnd = off + totalLength
 		proto = b[off+9]
 		src = netip.AddrFrom4([4]byte{b[off+12], b[off+13], b[off+14], b[off+15]})
 		dst = netip.AddrFrom4([4]byte{b[off+16], b[off+17], b[off+18], b[off+19]})
@@ -599,6 +606,11 @@ func decode(b []byte) (src, dst netip.Addr, proto uint8, sport, dport uint16, se
 		if len(b) < off+40 {
 			return
 		}
+		payloadLength := int(binary.BigEndian.Uint16(b[off+4 : off+6]))
+		if payloadLength == 0 || len(b) < off+40+payloadLength {
+			return
+		}
+		packetEnd = off + 40 + payloadLength
 		proto = b[off+6]
 		var a, d [16]byte
 		copy(a[:], b[off+8:off+24])
@@ -608,25 +620,29 @@ func decode(b []byte) (src, dst netip.Addr, proto uint8, sport, dport uint16, se
 	default:
 		return
 	}
-	if len(b) < off+8 {
+	if packetEnd < off+8 {
 		return
 	}
 	sport, dport = binary.BigEndian.Uint16(b[off:off+2]), binary.BigEndian.Uint16(b[off+2:off+4])
 	if proto == 17 {
-		payload = b[off+8:]
+		udpLength := int(binary.BigEndian.Uint16(b[off+4 : off+6]))
+		if udpLength < 8 || off+udpLength > packetEnd {
+			return
+		}
+		payload = b[off+8 : off+udpLength]
 		ok = true
 		return
 	}
-	if proto != 6 || len(b) < off+20 {
+	if proto != 6 || packetEnd < off+20 {
 		return
 	}
 	seq = binary.BigEndian.Uint32(b[off+4 : off+8])
 	hlen := int(b[off+12]>>4) * 4
 	flags = b[off+13]
-	if hlen < 20 || len(b) < off+hlen {
+	if hlen < 20 || packetEnd < off+hlen {
 		return
 	}
-	payload = b[off+hlen:]
+	payload = b[off+hlen : packetEnd]
 	ok = true
 	return
 }
