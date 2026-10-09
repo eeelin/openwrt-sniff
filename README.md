@@ -8,7 +8,7 @@ NFQUEUE, or forwarding rules.
 ## Current P0 scope
 
 - IPv4 and basic IPv6 TCP/UDP decoding
-- DNS query names, HTTP Host, TLS ClientHello SNI, and QUIC Initial SNI
+- DNS query/response names, HTTP Host, TLS ClientHello SNI, and QUIC Initial SNI
 - classic socket BPF filtering before packets enter userspace
 - bounded TCP prefix reassembly (16 KiB per flow by default)
 - live WebSocket updates with no persistent storage
@@ -28,6 +28,13 @@ Detection is content-based rather than limited to well-known ports. Supported
 protocols are DNS, HTTP, TLS, QUIC, SSH, RDP, STUN, DTLS, NTP, and BitTorrent
 (TCP handshake, UDP tracker, and uTP SYN). Signatures inspect only bounded flow
 prefixes and do not retain payloads after classification.
+
+Detection results include their confidence and domain source. TLS and QUIC
+ClientHello inspection also reports protocol version, ALPN values, and whether
+an ECH extension was offered. DNS A/AAAA responses (including CNAME chains) are
+kept in a client-isolated, TTL-bound in-memory cache so later connections can be
+annotated with a `dns_inferred` domain when HTTP Host or SNI is unavailable. The
+DNS cache is capped at 8192 entries and is never persisted.
 
 TCP inspection tracks connection boundaries from SYN/FIN/RST, resets reused
 five-tuples, and performs bounded out-of-order prefix reassembly. TLS

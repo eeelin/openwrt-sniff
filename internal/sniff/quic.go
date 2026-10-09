@@ -35,53 +35,53 @@ type quicFragment struct {
 	payload []byte
 }
 
-func quicClientHello(packet []byte, state *PacketState) (string, error) {
+func quicClientHello(packet []byte, state *PacketState) (Result, error) {
 	reader := bytes.NewReader(packet)
 	first, err := reader.ReadByte()
 	if err != nil || first&0x40 == 0 {
-		return "", errors.New("invalid QUIC long header")
+		return Result{}, errors.New("invalid QUIC long header")
 	}
 	var version uint32
 	if err = binary.Read(reader, binary.BigEndian, &version); err != nil {
-		return "", err
+		return Result{}, err
 	}
 	if version != quicDraft29 && version != quicV1 && version != quicV2 {
-		return "", errors.New("unsupported QUIC version")
+		return Result{}, errors.New("unsupported QUIC version")
 	}
 	packetType := (first & 0x30) >> 4
 	if (version == quicV2 && packetType != 1) || (version != quicV2 && packetType != 0) {
-		return "", errors.New("not a QUIC Initial")
+		return Result{}, errors.New("not a QUIC Initial")
 	}
 
 	dcidLen, err := reader.ReadByte()
 	if err != nil || dcidLen == 0 || dcidLen > 20 {
-		return "", errors.New("invalid destination connection id")
+		return Result{}, errors.New("invalid destination connection id")
 	}
 	dcid := make([]byte, dcidLen)
 	if _, err = io.ReadFull(reader, dcid); err != nil {
-		return "", err
+		return Result{}, err
 	}
 	scidLen, err := reader.ReadByte()
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	if _, err = io.CopyN(io.Discard, reader, int64(scidLen)); err != nil {
-		return "", err
+		return Result{}, err
 	}
 	tokenLen, err := readQUICVarint(reader)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	if _, err = io.CopyN(io.Discard, reader, int64(tokenLen)); err != nil {
-		return "", err
+		return Result{}, err
 	}
 	packetLen, err := readQUICVarint(reader)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	headerLen := len(packet) - reader.Len()
 	if headerLen+int(packetLen) > len(packet) || reader.Len() < 20 {
-		return "", ErrNeedMore
+		return Result{}, ErrNeedMore
 	}
 
 	sampleOffset := headerLen + 4
@@ -92,7 +92,7 @@ func quicClientHello(packet []byte, state *PacketState) (string, error) {
 	hpKey := quicHKDFLabel(secret, hpLabel, 16)
 	block, err := aes.NewCipher(hpKey)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	mask := make([]byte, aes.BlockSize)
 	block.Encrypt(mask, sample)
@@ -101,7 +101,7 @@ func quicClientHello(packet []byte, state *PacketState) (string, error) {
 	decoded[0] ^= mask[0] & 0x0f
 	pnLen := int(decoded[0]&0x03) + 1
 	if headerLen+pnLen > len(decoded) {
-		return "", ErrNeedMore
+		return Result{}, ErrNeedMore
 	}
 	for i := 0; i < pnLen; i++ {
 		decoded[headerLen+i] ^= mask[i+1]
@@ -113,13 +113,13 @@ func quicClientHello(packet []byte, state *PacketState) (string, error) {
 	aadEnd := headerLen + pnLen
 	ciphertextEnd := headerLen + int(packetLen)
 	if ciphertextEnd < aadEnd || ciphertextEnd-aadEnd < 16 {
-		return "", errors.New("invalid QUIC Initial payload length")
+		return Result{}, errors.New("invalid QUIC Initial payload length")
 	}
 	key := quicHKDFLabel(secret, keyLabel, 16)
 	iv := quicHKDFLabel(secret, ivLabel, 12)
 	aead, err := newQUICAEAD(key)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	nonce := append([]byte(nil), iv...)
 	for i := 0; i < 8; i++ {
@@ -127,29 +127,47 @@ func quicClientHello(packet []byte, state *PacketState) (string, error) {
 	}
 	plaintext, err := aead.Open(nil, nonce, decoded[aadEnd:ciphertextEnd], decoded[:aadEnd])
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 
 	fragments, err := quicCryptoFrames(plaintext)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	for _, fragment := range fragments {
 		if fragment.offset+uint64(len(fragment.payload)) > 64*1024 {
-			return "", errors.New("QUIC ClientHello exceeds observation limit")
+			return Result{}, errors.New("QUIC ClientHello exceeds observation limit")
 		}
 		state.fragments = addQUICFragment(state.fragments, fragment)
 	}
 	cryptoData := joinQUICFragments(state.fragments)
 	if len(cryptoData) == 0 {
-		return "", ErrNeedMore
+		return Result{}, ErrNeedMore
 	}
-	_, domain, err := tlsClientHello(cryptoData)
+	result, err := tlsClientHello(cryptoData)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	state.fragments = nil
-	return domain, nil
+	result.Protocol = "quic"
+	result.Version = quicVersion(version)
+	result.Confidence = "content"
+	if result.Domain != "" {
+		result.DomainSource = "quic_sni"
+	}
+	return result, nil
+}
+
+func quicVersion(version uint32) string {
+	switch version {
+	case quicV1:
+		return "QUIC v1"
+	case quicV2:
+		return "QUIC v2"
+	case quicDraft29:
+		return "QUIC draft-29"
+	}
+	return ""
 }
 
 func quicLabels(version uint32) (salt []byte, hp, key, iv string) {

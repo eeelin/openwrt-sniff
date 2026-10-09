@@ -49,6 +49,13 @@ type connectionState struct {
 	closed     bool
 	touched    time.Time
 }
+type dnsCacheKey struct {
+	client, address netip.Addr
+}
+type dnsCacheEntry struct {
+	domain  string
+	expires time.Time
+}
 type Status struct {
 	Capturing     bool               `json:"capturing"`
 	Interfaces    []string           `json:"interfaces"`
@@ -84,6 +91,7 @@ type Manager struct {
 	streams         map[flow.Key]*streamState
 	packetStreams   map[flow.Key]*packetState
 	connections     map[flow.Key]*connectionState
+	dnsCache        map[dnsCacheKey]dnsCacheEntry
 	packets         uint64
 	generation      uint64
 	active          int
@@ -98,7 +106,7 @@ type Manager struct {
 }
 
 func NewManager(interfaces []string, prefixes []netip.Prefix, maxStream int, store *flow.Store, matcher *nftset.Matcher) *Manager {
-	return &Manager{interfaces: interfaces, prefixes: prefixes, maxStream: maxStream, store: store, matcher: matcher, streams: make(map[flow.Key]*streamState), packetStreams: make(map[flow.Key]*packetState), connections: make(map[flow.Key]*connectionState), status: Status{Interfaces: interfaces}}
+	return &Manager{interfaces: interfaces, prefixes: prefixes, maxStream: maxStream, store: store, matcher: matcher, streams: make(map[flow.Key]*streamState), packetStreams: make(map[flow.Key]*packetState), connections: make(map[flow.Key]*connectionState), dnsCache: make(map[dnsCacheKey]dnsCacheEntry), status: Status{Interfaces: interfaces}}
 }
 
 func (m *Manager) Start() error {
@@ -172,6 +180,7 @@ func (m *Manager) Stop() {
 	m.streams = make(map[flow.Key]*streamState)
 	m.packetStreams = make(map[flow.Key]*packetState)
 	m.connections = make(map[flow.Key]*connectionState)
+	m.dnsCache = make(map[dnsCacheKey]dnsCacheEntry)
 	m.mu.Unlock()
 }
 func (m *Manager) Status() Status {
@@ -278,26 +287,26 @@ func (m *Manager) consume(packet []byte) {
 		m.pruneStreamsLocked(time.Now())
 	}
 	m.mu.Unlock()
-	protocol, domain, connectionStatus := "", "", ""
+	detection, connectionStatus := sniff.Result{}, ""
 	diagnostic := flow.Diagnostic{State: "pending"}
 	if proto == 17 {
 		var sniffErr error
 		m.mu.Lock()
 		state, retained := m.packetStreams[rawKey]
 		if retained {
-			protocol, domain, sniffErr = sniff.Packet(sport, dport, payload, &state.sniff)
-			diagnostic = packetDiagnostic(protocol, sniffErr)
+			detection, sniffErr = sniff.Packet(sport, dport, payload, &state.sniff)
+			diagnostic = packetDiagnostic(detection.Protocol, sniffErr)
 			state.touched = time.Now()
-			if domain != "" {
+			if detection.Domain != "" {
 				delete(m.packetStreams, rawKey)
 			}
 			m.mu.Unlock()
 		} else {
 			m.mu.Unlock()
 			candidate := &packetState{touched: time.Now()}
-			protocol, domain, sniffErr = sniff.Packet(sport, dport, payload, &candidate.sniff)
-			diagnostic = packetDiagnostic(protocol, sniffErr)
-			if protocol == "quic" && domain == "" {
+			detection, sniffErr = sniff.Packet(sport, dport, payload, &candidate.sniff)
+			diagnostic = packetDiagnostic(detection.Protocol, sniffErr)
+			if detection.Protocol == "quic" && detection.Domain == "" {
 				m.mu.Lock()
 				if _, exists := m.packetStreams[rawKey]; !exists {
 					m.packetStreams[rawKey] = candidate
@@ -374,12 +383,12 @@ func (m *Manager) consume(packet []byte) {
 				m.sequenceGaps.Add(1)
 			}
 			var sniffErr error
-			if dport == 53 && len(state.data) > 2 {
-				protocol, domain, sniffErr = sniff.Packet(sport, dport, state.data[2:], nil)
+			if (sport == 53 || dport == 53) && len(state.data) > 2 {
+				detection, sniffErr = sniff.Packet(sport, dport, state.data[2:], nil)
 			} else {
-				protocol, domain, sniffErr = sniff.Stream(state.data)
+				detection, sniffErr = sniff.Stream(state.data)
 			}
-			if protocol != "" {
+			if detection.Protocol != "" {
 				state.done = true
 				state.state = "identified"
 				state.lastError = ""
@@ -435,8 +444,65 @@ func (m *Manager) consume(packet []byte) {
 		proxyAddress = src
 	}
 	proxySetMatch := m.matcher != nil && m.matcher.Contains(proxyAddress)
+	m.enrichFromDNS(&detection, src, dst, direction, time.Now())
 	initiatorKnown := proto == 6 && flags&0x02 != 0 && flags&0x10 == 0
-	m.store.Observe(key, len(packet), protocol, domain, direction, internalType, connectionStatus, forward, initiatorKnown, proxySetMatch, diagnostic)
+	m.store.Observe(key, len(packet), flow.Detection{Protocol: detection.Protocol, Domain: detection.Domain, DomainSource: detection.DomainSource, Version: detection.Version, ALPN: detection.ALPN, ECH: detection.ECH, Confidence: detection.Confidence}, direction, internalType, connectionStatus, forward, initiatorKnown, proxySetMatch, diagnostic)
+}
+
+func (m *Manager) enrichFromDNS(result *sniff.Result, source, destination netip.Addr, direction string, now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if result.DNS != nil && result.DNS.Response {
+		for _, answer := range result.DNS.Answers {
+			if answer.TTL == 0 || !answer.Address.IsValid() || answer.Name == "" {
+				continue
+			}
+			ttl := time.Duration(answer.TTL) * time.Second
+			if ttl > 24*time.Hour {
+				ttl = 24 * time.Hour
+			}
+			m.dnsCache[dnsCacheKey{client: destination, address: answer.Address}] = dnsCacheEntry{domain: answer.Name, expires: now.Add(ttl)}
+		}
+		if len(m.dnsCache) > 8192 {
+			m.boundDNSCacheLocked(now)
+		}
+	}
+	if result.Domain != "" || result.Protocol == "dns" {
+		return
+	}
+	client, remote := source, destination
+	if direction == "inbound" {
+		client, remote = destination, source
+	}
+	key := dnsCacheKey{client: client, address: remote}
+	entry, ok := m.dnsCache[key]
+	if !ok {
+		return
+	}
+	if !now.Before(entry.expires) {
+		delete(m.dnsCache, key)
+		return
+	}
+	result.Domain = entry.domain
+	result.DomainSource = "dns_inferred"
+}
+
+func (m *Manager) boundDNSCacheLocked(now time.Time) {
+	for key, entry := range m.dnsCache {
+		if !now.Before(entry.expires) {
+			delete(m.dnsCache, key)
+		}
+	}
+	for len(m.dnsCache) > 8192 {
+		var oldestKey dnsCacheKey
+		var oldest time.Time
+		for key, entry := range m.dnsCache {
+			if oldest.IsZero() || entry.expires.Before(oldest) {
+				oldestKey, oldest = key, entry.expires
+			}
+		}
+		delete(m.dnsCache, oldestKey)
+	}
 }
 
 func connectionKey(key flow.Key, direction string) (flow.Key, bool) {
@@ -622,6 +688,7 @@ func (m *Manager) pruneStreamsLocked(now time.Time) {
 			delete(m.connections, key)
 		}
 	}
+	m.boundDNSCacheLocked(now)
 	for len(m.streams) > 8192 {
 		var oldestKey flow.Key
 		var oldest time.Time

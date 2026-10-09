@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/eeelin/openwrt-sniff/internal/flow"
+	"github.com/eeelin/openwrt-sniff/internal/sniff"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 func TestTCPDiagnostics(t *testing.T) {
@@ -113,6 +115,78 @@ func TestUDPHasNoConnectionState(t *testing.T) {
 	manager.consume(udpFrame([4]byte{192, 0, 2, 10}, [4]byte{198, 51, 100, 20}, 50000, 53, nil))
 	if got := store.Snapshot()[0].ConnectionState; got != "" {
 		t.Fatalf("UDP connection state = %q, want empty", got)
+	}
+}
+
+func TestDNSResponseEnrichesLaterConnection(t *testing.T) {
+	store := flow.NewStore(16, time.Minute)
+	manager := NewManager(nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, 1024, store, nil)
+	client := [4]byte{192, 0, 2, 10}
+	resolver := [4]byte{192, 0, 2, 1}
+	remote := [4]byte{203, 0, 113, 8}
+	name := dnsmessage.MustNewName("www.example.com.")
+	builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{Response: true})
+	builder.EnableCompression()
+	if err := builder.StartQuestions(); err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.Question(dnsmessage.Question{Name: name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}); err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.StartAnswers(); err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.AResource(dnsmessage.ResourceHeader{Name: name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 300}, dnsmessage.AResource{A: remote}); err != nil {
+		t.Fatal(err)
+	}
+	response, err := builder.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.consume(udpFrame(resolver, client, 53, 53000, response))
+	manager.consume(tcpFrame(client, remote, 50000, 443, 1000, 0x02, nil))
+	for _, got := range store.Snapshot() {
+		if got.Network == "tcp" {
+			if got.Domain != "www.example.com" || got.DomainSource != "dns_inferred" {
+				t.Fatalf("TCP flow was not enriched from DNS: %+v", got)
+			}
+			return
+		}
+	}
+	t.Fatal("TCP flow was not captured")
+}
+
+func TestDNSInferenceHonorsTTL(t *testing.T) {
+	manager := NewManager(nil, nil, 1024, flow.NewStore(16, time.Minute), nil)
+	client := netip.MustParseAddr("192.0.2.10")
+	remote := netip.MustParseAddr("203.0.113.8")
+	now := time.Now()
+	response := sniff.Result{Protocol: "dns", DNS: &sniff.DNSMessage{Response: true, Answers: []sniff.DNSAnswer{{Name: "short.example", Address: remote, TTL: 1}}}}
+	manager.enrichFromDNS(&response, netip.MustParseAddr("192.0.2.1"), client, "internal", now)
+	lookup := sniff.Result{}
+	manager.enrichFromDNS(&lookup, client, remote, "outbound", now.Add(2*time.Second))
+	if lookup.Domain != "" || len(manager.dnsCache) != 0 {
+		t.Fatalf("expired DNS entry was used: result=%+v cache=%+v", lookup, manager.dnsCache)
+	}
+}
+
+func TestDNSInferenceIsIsolatedByClient(t *testing.T) {
+	manager := NewManager(nil, nil, 1024, flow.NewStore(16, time.Minute), nil)
+	client := netip.MustParseAddr("192.0.2.10")
+	otherClient := netip.MustParseAddr("192.0.2.11")
+	remote := netip.MustParseAddr("2001:db8::8")
+	now := time.Now()
+	response := sniff.Result{Protocol: "dns", DNS: &sniff.DNSMessage{Response: true, Answers: []sniff.DNSAnswer{{Name: "ipv6.example", Address: remote, TTL: 300}}}}
+	manager.enrichFromDNS(&response, netip.MustParseAddr("192.0.2.1"), client, "internal", now)
+	otherLookup := sniff.Result{}
+	manager.enrichFromDNS(&otherLookup, otherClient, remote, "outbound", now)
+	if otherLookup.Domain != "" {
+		t.Fatalf("DNS entry leaked to another client: %+v", otherLookup)
+	}
+	clientLookup := sniff.Result{}
+	manager.enrichFromDNS(&clientLookup, client, remote, "outbound", now)
+	if clientLookup.Domain != "ipv6.example" || clientLookup.DomainSource != "dns_inferred" {
+		t.Fatalf("client DNS entry was not found: %+v", clientLookup)
 	}
 }
 

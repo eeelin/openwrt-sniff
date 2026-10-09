@@ -4,76 +4,97 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"net/netip"
 	"strings"
+
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 var ErrNeedMore = errors.New("need more data")
 
-func Stream(data []byte) (protocol, domain string, err error) {
+func Stream(data []byte) (Result, error) {
 	if len(data) == 0 {
-		return "", "", ErrNeedMore
+		return Result{}, ErrNeedMore
 	}
 	if looksTLS(data) {
 		return tls(data)
 	}
 	if looksHTTP(data) {
-		return http(data)
+		protocol, domain, err := http(data)
+		return Result{Protocol: protocol, Domain: domain, DomainSource: domainSource(domain, "http_host"), Confidence: "content"}, err
 	}
 	if matchPrefix(data, []byte("SSH-2.0-")) {
 		if !bytes.Contains(data, []byte{'\n'}) {
-			return "", "", ErrNeedMore
+			return Result{}, ErrNeedMore
 		}
-		return "ssh", "", nil
+		return Result{Protocol: "ssh", Confidence: "content"}, nil
 	}
 	if matchPrefix(data, []byte("\x13BitTorrent protocol")) {
 		if len(data) < 20 {
-			return "", "", ErrNeedMore
+			return Result{}, ErrNeedMore
 		}
-		return "bittorrent", "", nil
+		return Result{Protocol: "bittorrent", Confidence: "content"}, nil
 	}
 	if protocol, ok, needMore := detectRDP(data); ok {
-		return protocol, "", nil
+		return Result{Protocol: protocol, Confidence: "content"}, nil
 	} else if needMore {
-		return "", "", ErrNeedMore
+		return Result{}, ErrNeedMore
 	}
-	return "", "", errors.New("unknown stream protocol")
+	return Result{}, errors.New("unknown stream protocol")
 }
 
-func Packet(srcPort, dstPort uint16, data []byte, state *PacketState) (protocol, domain string, err error) {
+func Packet(srcPort, dstPort uint16, data []byte, state *PacketState) (Result, error) {
 	if srcPort == 53 || dstPort == 53 || looksDNSQuery(data) {
-		domain, err = dns(data)
+		message, err := dns(data)
 		if err == nil || srcPort == 53 || dstPort == 53 {
-			return "dns", domain, err
+			result := Result{Protocol: "dns", Confidence: "content", DNS: message}
+			if message != nil {
+				result.Domain = message.Question
+				result.DomainSource = domainSource(result.Domain, "dns_question")
+			}
+			return result, err
 		}
 	}
 	if looksQUIC(data) || srcPort == 443 || dstPort == 443 {
 		if state == nil {
 			state = &PacketState{}
 		}
-		domain, err = quicClientHello(data, state)
+		result, err := quicClientHello(data, state)
 		if errors.Is(err, ErrNeedMore) {
-			return "quic", "", nil
+			return partialQUICResult(data), nil
 		}
 		if err != nil && looksQUIC(data) {
-			return "quic", "", nil
+			return partialQUICResult(data), nil
 		}
 		if err == nil {
-			return "quic", domain, nil
+			return result, nil
 		}
 	}
 	if looksSTUN(data) {
-		return "stun", "", nil
+		return Result{Protocol: "stun", Confidence: "content"}, nil
 	}
 	if looksDTLS(data) {
-		return "dtls", "", nil
+		return Result{Protocol: "dtls", Version: dtlsVersion(data), Confidence: "content"}, nil
 	}
 	if looksBitTorrentPacket(data) {
-		return "bittorrent", "", nil
+		return Result{Protocol: "bittorrent", Confidence: "content"}, nil
 	}
 	if looksNTP(data) || ((srcPort == 123 || dstPort == 123) && len(data) >= 48) {
-		return "ntp", "", nil
+		confidence := "content"
+		if !looksNTP(data) {
+			confidence = "port"
+		}
+		return Result{Protocol: "ntp", Confidence: confidence}, nil
 	}
-	return "", "", errors.New("unknown packet protocol")
+	return Result{}, errors.New("unknown packet protocol")
+}
+
+func partialQUICResult(data []byte) Result {
+	result := Result{Protocol: "quic", Confidence: "content"}
+	if len(data) >= 5 {
+		result.Version = quicVersion(binary.BigEndian.Uint32(data[1:5]))
+	}
+	return result
 }
 
 func looksTLS(data []byte) bool {
@@ -131,18 +152,18 @@ func http(data []byte) (string, string, error) {
 	return "http", "", nil
 }
 
-func tls(data []byte) (string, string, error) {
+func tls(data []byte) (Result, error) {
 	var handshake []byte
 	for offset := 0; ; {
 		if len(data)-offset < 5 {
-			return "", "", ErrNeedMore
+			return Result{}, ErrNeedMore
 		}
 		if data[offset] != 0x16 {
-			return "", "", errors.New("not a TLS handshake record")
+			return Result{}, errors.New("not a TLS handshake record")
 		}
 		recordLen := int(binary.BigEndian.Uint16(data[offset+3 : offset+5]))
 		if len(data)-offset < 5+recordLen {
-			return "", "", ErrNeedMore
+			return Result{}, ErrNeedMore
 		}
 		handshake = append(handshake, data[offset+5:offset+5+recordLen]...)
 		if len(handshake) >= 4 {
@@ -153,43 +174,44 @@ func tls(data []byte) (string, string, error) {
 		}
 		offset += 5 + recordLen
 		if offset == len(data) {
-			return "", "", ErrNeedMore
+			return Result{}, ErrNeedMore
 		}
 	}
 }
 
-func tlsClientHello(data []byte) (string, string, error) {
+func tlsClientHello(data []byte) (Result, error) {
 	if len(data) < 39 || data[0] != 1 {
-		return "", "", errors.New("not client hello")
+		return Result{}, errors.New("not client hello")
 	}
+	result := Result{Protocol: "tls", Version: tlsVersion(binary.BigEndian.Uint16(data[4:6])), Confidence: "content"}
 	p := 38
 	if p >= len(data) {
-		return "", "", ErrNeedMore
+		return Result{}, ErrNeedMore
 	}
 	p += 1 + int(data[p])
 	if p+2 > len(data) {
-		return "", "", ErrNeedMore
+		return Result{}, ErrNeedMore
 	}
 	p += 2 + int(binary.BigEndian.Uint16(data[p:p+2]))
 	if p >= len(data) {
-		return "", "", ErrNeedMore
+		return Result{}, ErrNeedMore
 	}
 	p += 1 + int(data[p])
 	if p+2 > len(data) {
-		return "", "", ErrNeedMore
+		return Result{}, ErrNeedMore
 	}
 	extLen := int(binary.BigEndian.Uint16(data[p : p+2]))
 	p += 2
 	end := p + extLen
 	if end > len(data) {
-		return "", "", ErrNeedMore
+		return Result{}, ErrNeedMore
 	}
 	for p+4 <= end {
 		typ := binary.BigEndian.Uint16(data[p : p+2])
 		n := int(binary.BigEndian.Uint16(data[p+2 : p+4]))
 		p += 4
 		if p+n > end {
-			return "", "", errors.New("invalid tls extension")
+			return Result{}, errors.New("invalid tls extension")
 		}
 		if typ == 0 && n >= 5 {
 			q := p + 2
@@ -201,39 +223,132 @@ func tlsClientHello(data []byte) (string, string, error) {
 					break
 				}
 				if nameType == 0 {
-					return "tls", string(data[q : q+nameLen]), nil
+					result.Domain = string(data[q : q+nameLen])
+					result.DomainSource = "tls_sni"
+					break
 				}
 				q += nameLen
 			}
+		} else if typ == 16 {
+			result.ALPN = parseALPN(data[p : p+n])
+		} else if typ == 43 && n >= 3 {
+			length := int(data[p])
+			var selected uint16
+			for q := p + 1; q+1 < p+n && q < p+1+length; q += 2 {
+				version := binary.BigEndian.Uint16(data[q : q+2])
+				if tlsVersion(version) != "" && version > selected {
+					selected = version
+				}
+			}
+			result.Version = tlsVersion(selected)
+		} else if typ == 0xfe0d || typ == 0xffce {
+			result.ECH = true
 		}
 		p += n
 	}
-	return "tls", "", nil
+	return result, nil
 }
 
-func dns(data []byte) (string, error) {
-	if len(data) < 12 {
-		return "", ErrNeedMore
+func dns(data []byte) (*DNSMessage, error) {
+	var parser dnsmessage.Parser
+	header, err := parser.Start(data)
+	if err != nil {
+		return nil, ErrNeedMore
 	}
-	if binary.BigEndian.Uint16(data[4:6]) == 0 {
-		return "", errors.New("no question")
+	questions, err := parser.AllQuestions()
+	if err != nil || len(questions) == 0 {
+		return nil, errors.New("no valid DNS question")
 	}
-	p := 12
-	labels := make([]string, 0, 4)
-	for {
-		if p >= len(data) {
-			return "", ErrNeedMore
+	message := &DNSMessage{Response: header.Response, Question: dnsName(questions[0].Name.String())}
+	if !header.Response {
+		return message, nil
+	}
+	answers, err := parser.AllAnswers()
+	if err != nil {
+		return message, err
+	}
+	aliases := map[string]string{}
+	for _, answer := range answers {
+		if cname, ok := answer.Body.(*dnsmessage.CNAMEResource); ok {
+			aliases[dnsName(answer.Header.Name.String())] = dnsName(cname.CNAME.String())
 		}
+	}
+	allowed := map[string]bool{message.Question: true}
+	for changed := true; changed; {
+		changed = false
+		for source, target := range aliases {
+			if allowed[source] && !allowed[target] {
+				allowed[target], changed = true, true
+			}
+		}
+	}
+	for _, answer := range answers {
+		name := dnsName(answer.Header.Name.String())
+		if !allowed[name] {
+			continue
+		}
+		var address netip.Addr
+		switch body := answer.Body.(type) {
+		case *dnsmessage.AResource:
+			address = netip.AddrFrom4(body.A)
+		case *dnsmessage.AAAAResource:
+			address = netip.AddrFrom16(body.AAAA)
+		}
+		if address.IsValid() {
+			message.Answers = append(message.Answers, DNSAnswer{Name: message.Question, Address: address, TTL: answer.Header.TTL})
+		}
+	}
+	return message, nil
+}
+
+func domainSource(domain, source string) string {
+	if domain == "" {
+		return ""
+	}
+	return source
+}
+func dnsName(name string) string { return strings.TrimSuffix(strings.ToLower(name), ".") }
+
+func parseALPN(data []byte) []string {
+	if len(data) < 2 || int(binary.BigEndian.Uint16(data[:2])) > len(data)-2 {
+		return nil
+	}
+	var result []string
+	for p, end := 2, 2+int(binary.BigEndian.Uint16(data[:2])); p < end; {
 		n := int(data[p])
 		p++
-		if n == 0 {
-			break
+		if n == 0 || p+n > end {
+			return result
 		}
-		if n&0xc0 != 0 || n > 63 || p+n > len(data) {
-			return "", errors.New("invalid dns name")
-		}
-		labels = append(labels, string(data[p:p+n]))
+		result = append(result, string(data[p:p+n]))
 		p += n
 	}
-	return strings.Join(labels, "."), nil
+	return result
+}
+
+func tlsVersion(version uint16) string {
+	switch version {
+	case 0x0301:
+		return "TLS 1.0"
+	case 0x0302:
+		return "TLS 1.1"
+	case 0x0303:
+		return "TLS 1.2"
+	case 0x0304:
+		return "TLS 1.3"
+	}
+	return ""
+}
+
+func dtlsVersion(data []byte) string {
+	if len(data) < 3 {
+		return ""
+	}
+	if data[2] == 0xfd {
+		return "DTLS 1.2"
+	}
+	if data[2] == 0xff {
+		return "DTLS 1.0"
+	}
+	return ""
 }
