@@ -77,7 +77,7 @@ Install a package already copied to the router:
 
 ```sh
 chmod +x ./install.sh
-./install.sh --local /tmp/openwrt-sniff_0.5.0-1_x86_64.ipk
+./install.sh --local /tmp/openwrt-sniff_0.6.0-1_x86_64.ipk
 ```
 
 After a GitHub Release has been published, install the latest compatible build:
