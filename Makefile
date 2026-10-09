@@ -13,5 +13,4 @@ test:
 	cd web && npm run build
 
 clean:
-	rm -rf dist web/dist/assets web/node_modules
-
+	rm -rf dist web/dist/assets web/dist/index.html web/node_modules
