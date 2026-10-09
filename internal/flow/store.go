@@ -20,6 +20,8 @@ type Flow struct {
 	Source         string `json:"source"`
 	Destination    string `json:"destination"`
 	Network        string `json:"network"`
+	Direction      string `json:"direction"`
+	InternalType   string `json:"internal_type,omitempty"`
 	Protocol       string `json:"protocol,omitempty"`
 	Domain         string `json:"domain,omitempty"`
 	PacketsSeen    uint64 `json:"packets_seen"`
@@ -62,7 +64,7 @@ func NewStore(max int, window time.Duration) *Store {
 	return &Store{items: make(map[Key]*Flow), max: max, window: window, subs: make(map[chan Event]struct{})}
 }
 
-func (s *Store) Observe(key Key, size int, protocol, domain string, proxySetMatch bool, diagnostic Diagnostic) Flow {
+func (s *Store) Observe(key Key, size int, protocol, domain, direction, internalType string, proxySetMatch bool, diagnostic Diagnostic) Flow {
 	now := time.Now().UnixMilli()
 	s.mu.Lock()
 	f, ok := s.items[key]
@@ -79,6 +81,7 @@ func (s *Store) Observe(key Key, size int, protocol, domain string, proxySetMatc
 		eventType = "flow.open"
 	}
 	f.LastSeen, f.PacketsSeen, f.BytesSampled = now, f.PacketsSeen+1, f.BytesSampled+uint64(size)
+	f.Direction, f.InternalType = direction, internalType
 	if protocol != "" {
 		f.Protocol = protocol
 	}

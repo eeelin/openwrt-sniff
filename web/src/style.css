@@ -172,7 +172,13 @@ button:disabled {
   padding: 14px;
   border-bottom: 1px solid #222e27;
 }
-.toolbar input {
+.filters {
+  min-width: min(660px, 65vw);
+  flex-direction: column;
+  align-items: stretch !important;
+  gap: 9px;
+}
+.filters > input {
   width: min(470px, 55vw);
   border: 1px solid #2b3830;
   border-radius: 8px;
@@ -181,8 +187,32 @@ button:disabled {
   padding: 10px 12px;
   outline: none;
 }
-.toolbar input:focus {
+.filters > input:focus {
   border-color: #4dbb76;
+}
+.direction-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.direction-filter label {
+  border: 1px solid #2b3830;
+  border-radius: 999px;
+  color: #74847a;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 5px 9px;
+  user-select: none;
+}
+.direction-filter label.selected {
+  border-color: #3c8157;
+  background: #16291d;
+  color: #78d99e;
+}
+.direction-filter input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 .toolbar > div {
   display: flex;
@@ -252,6 +282,18 @@ td {
   background: #26243b;
   color: #bcb4ff;
 }
+.pill.direction.internal {
+  background: #1c3040;
+  color: #8dccf4;
+}
+.pill.direction.outbound {
+  background: #1d3025;
+  color: #78d99e;
+}
+.pill.direction.inbound {
+  background: #39291d;
+  color: #efb77d;
+}
 .muted {
   color: #59675f;
 }
@@ -282,7 +324,10 @@ footer {
     gap: 12px;
     flex-direction: column;
   }
-  .toolbar input {
+  .filters {
+    min-width: 0;
+  }
+  .filters > input {
     width: 100%;
   }
   .toolbar > div {

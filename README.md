@@ -12,6 +12,8 @@ NFQUEUE, or forwarding rules.
 - classic socket BPF filtering before packets enter userspace
 - bounded TCP prefix reassembly (16 KiB per flow by default)
 - live WebSocket updates with no persistent storage
+- direction-aware flows for inbound, outbound, and LAN communication; LAN flows
+  distinguish unicast, multicast, and broadcast traffic
 - capture starts and stops from the web page
 - automatic LAN prefix discovery and optional explicit IPv4/IPv6 prefixes
 - AF_PACKET packet-drop/queue-freeze counters and per-interface capture errors
