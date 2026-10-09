@@ -92,6 +92,53 @@ func TestEthernetPaddingBeforePayloadDoesNotPoisonStream(t *testing.T) {
 	}
 }
 
+func TestDirectionClassification(t *testing.T) {
+	manager := NewManager(nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, 1024, flow.NewStore(16, time.Minute), nil)
+	lan := netip.MustParseAddr("192.0.2.10")
+	peer := netip.MustParseAddr("192.0.2.20")
+	public := netip.MustParseAddr("198.51.100.20")
+	tests := []struct {
+		name, direction, internalType string
+		source, destination           netip.Addr
+		packet                        []byte
+	}{
+		{"internal unicast", "internal", "unicast", lan, peer, make([]byte, 14)},
+		{"internal multicast", "internal", "multicast", lan, netip.MustParseAddr("239.1.2.3"), make([]byte, 14)},
+		{"internal limited broadcast", "internal", "broadcast", lan, netip.MustParseAddr("255.255.255.255"), make([]byte, 14)},
+		{"internal directed broadcast", "internal", "broadcast", lan, netip.MustParseAddr("192.0.2.255"), make([]byte, 14)},
+		{"outbound", "outbound", "", lan, public, make([]byte, 14)},
+		{"inbound", "inbound", "", public, lan, make([]byte, 14)},
+		{"unrelated", "", "", public, netip.MustParseAddr("203.0.113.5"), make([]byte, 14)},
+	}
+	broadcastFrame := make([]byte, 14)
+	for i := range 6 {
+		broadcastFrame[i] = 0xff
+	}
+	tests = append(tests, struct {
+		name, direction, internalType string
+		source, destination           netip.Addr
+		packet                        []byte
+	}{"layer-2 broadcast", "internal", "broadcast", lan, public, broadcastFrame})
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			direction, internalType := manager.classifyDirection(test.packet, test.source, test.destination)
+			if direction != test.direction || internalType != test.internalType {
+				t.Fatalf("got %q/%q, want %q/%q", direction, internalType, test.direction, test.internalType)
+			}
+		})
+	}
+}
+
+func TestInboundFlowIsCaptured(t *testing.T) {
+	store := flow.NewStore(16, time.Minute)
+	manager := NewManager(nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, 1024, store, nil)
+	manager.consume(tcpFrame([4]byte{198, 51, 100, 20}, [4]byte{192, 0, 2, 10}, 443, 50000, 1000, 0x12, nil))
+	flows := store.Snapshot()
+	if len(flows) != 1 || flows[0].Direction != "inbound" {
+		t.Fatalf("inbound flow was not captured: %+v", flows)
+	}
+}
+
 func tcpFrame(source, destination [4]byte, sourcePort, destinationPort uint16, sequence uint32, flags byte, payload []byte) []byte {
 	packet := make([]byte, 14+20+20+len(payload))
 	packet[12], packet[13] = 0x08, 0x00

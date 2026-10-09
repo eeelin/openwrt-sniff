@@ -254,7 +254,8 @@ func (m *Manager) consume(packet []byte) {
 		m.decodeFailures.Add(1)
 		return
 	}
-	if !m.isLANSource(src) {
+	direction, internalType := m.classifyDirection(packet, src, dst)
+	if direction == "" {
 		m.nonLAN.Add(1)
 		return
 	}
@@ -378,8 +379,58 @@ func (m *Manager) consume(packet []byte) {
 		}
 		m.mu.Unlock()
 	}
-	proxySetMatch := m.matcher != nil && m.matcher.Contains(dst)
-	m.store.Observe(key, len(packet), protocol, domain, proxySetMatch, diagnostic)
+	proxyAddress := dst
+	if direction == "inbound" {
+		proxyAddress = src
+	}
+	proxySetMatch := m.matcher != nil && m.matcher.Contains(proxyAddress)
+	m.store.Observe(key, len(packet), protocol, domain, direction, internalType, proxySetMatch, diagnostic)
+}
+
+func (m *Manager) classifyDirection(packet []byte, src, dst netip.Addr) (direction, internalType string) {
+	sourceLAN, destinationLAN := m.isLANAddress(src), m.isLANAddress(dst)
+	if sourceLAN && (destinationLAN || dst.IsMulticast() || isBroadcast(packet, dst, m.prefixes)) {
+		switch {
+		case isBroadcast(packet, dst, m.prefixes):
+			return "internal", "broadcast"
+		case dst.IsMulticast():
+			return "internal", "multicast"
+		default:
+			return "internal", "unicast"
+		}
+	}
+	if sourceLAN {
+		return "outbound", ""
+	}
+	if destinationLAN {
+		return "inbound", ""
+	}
+	return "", ""
+}
+
+func isBroadcast(packet []byte, destination netip.Addr, prefixes []netip.Prefix) bool {
+	if len(packet) >= 6 && packet[0] == 0xff && packet[1] == 0xff && packet[2] == 0xff && packet[3] == 0xff && packet[4] == 0xff && packet[5] == 0xff {
+		return true
+	}
+	if !destination.Is4() {
+		return false
+	}
+	value := destination.As4()
+	if value == [4]byte{255, 255, 255, 255} {
+		return true
+	}
+	destinationValue := binary.BigEndian.Uint32(value[:])
+	for _, prefix := range prefixes {
+		if !prefix.Addr().Is4() || prefix.Bits() > 30 {
+			continue
+		}
+		address := prefix.Masked().Addr().As4()
+		mask := ^uint32(0) << (32 - prefix.Bits())
+		if destinationValue == binary.BigEndian.Uint32(address[:])|^mask {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *streamState) add(sequence uint32, payload []byte, limit int) (gap int32, retransmission bool) {
@@ -508,7 +559,7 @@ func (m *Manager) pruneStreamsLocked(now time.Time) {
 	}
 }
 
-func (m *Manager) isLANSource(ip netip.Addr) bool {
+func (m *Manager) isLANAddress(ip netip.Addr) bool {
 	for _, prefix := range m.prefixes {
 		if prefix.Contains(ip) {
 			return true
