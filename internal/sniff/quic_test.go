@@ -24,9 +24,9 @@ func TestQUICFragmentOverlapAndGap(t *testing.T) {
 
 func TestQUICClientHelloSNI(t *testing.T) {
 	packet := makeQUICInitial(t, "quic.example.com")
-	domain, err := quicClientHello(packet, &PacketState{})
-	if err != nil || domain != "quic.example.com" {
-		t.Fatalf("got domain=%q err=%v", domain, err)
+	result, err := quicClientHello(packet, &PacketState{})
+	if err != nil || result.Domain != "quic.example.com" || result.Version != "QUIC v1" || len(result.ALPN) != 1 || result.ALPN[0] != "h3" || !result.ECH {
+		t.Fatalf("got result=%+v err=%v", result, err)
 	}
 }
 
@@ -40,6 +40,8 @@ func makeQUICInitial(t *testing.T, serverName string) []byte {
 	extensions := make([]byte, 4+len(sni))
 	binary.BigEndian.PutUint16(extensions[2:4], uint16(len(sni)))
 	copy(extensions[4:], sni)
+	extensions = append(extensions, 0, 16, 0, 5, 0, 3, 2, 'h', '3')
+	extensions = append(extensions, 0xfe, 0x0d, 0, 0)
 	body := append([]byte{3, 3}, make([]byte, 32)...)
 	body = append(body, 0, 0, 2, 0x13, 1, 1, 0, byte(len(extensions)>>8), byte(len(extensions)))
 	body = append(body, extensions...)
