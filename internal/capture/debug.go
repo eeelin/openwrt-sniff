@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	debugCaptureDuration = 30 * time.Second
-	debugCaptureMaxBytes = 2 << 20
+	debugCaptureDuration  = 30 * time.Second
+	debugCaptureMaxBytes  = 2 << 20
+	debugCaptureRetention = 5 * time.Minute
 )
 
 type DebugCaptureStatus struct {
@@ -37,20 +38,30 @@ type DebugCaptureOptions struct {
 }
 
 type debugRecorder struct {
-	mu         sync.Mutex
-	buffer     bytes.Buffer
-	writer     *pcapgo.Writer
-	active     bool
-	activeFast atomic.Bool
-	startedAt  time.Time
-	expiresAt  time.Time
-	packets    int
-	options    DebugCaptureOptions
+	mu          sync.Mutex
+	buffer      bytes.Buffer
+	writer      *pcapgo.Writer
+	active      bool
+	activeFast  atomic.Bool
+	startedAt   time.Time
+	expiresAt   time.Time
+	readyUntil  time.Time
+	expiryTimer *time.Timer
+	generation  uint64
+	packets     int
+	options     DebugCaptureOptions
 }
 
 func (r *debugRecorder) Start(options DebugCaptureOptions) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.generation++
+	if r.expiryTimer != nil {
+		r.expiryTimer.Stop()
+		r.expiryTimer = nil
+	}
+	r.active = false
+	r.activeFast.Store(false)
 	r.buffer.Reset()
 	r.writer = pcapgo.NewWriter(&r.buffer)
 	if err := r.writer.WriteFileHeader(65535, layers.LinkTypeEthernet); err != nil {
@@ -60,15 +71,18 @@ func (r *debugRecorder) Start(options DebugCaptureOptions) error {
 	r.activeFast.Store(true)
 	r.startedAt = time.Now()
 	r.expiresAt = r.startedAt.Add(debugCaptureDuration)
+	r.readyUntil = time.Time{}
 	r.packets = 0
 	r.options = options
+	generation := r.generation
+	r.expiryTimer = time.AfterFunc(debugCaptureDuration, func() { r.finish(generation) })
 	return nil
 }
 
 func (r *debugRecorder) Stop() {
 	r.activeFast.Store(false)
 	r.mu.Lock()
-	r.active = false
+	r.finishLocked(time.Now())
 	r.mu.Unlock()
 }
 
@@ -82,8 +96,7 @@ func (r *debugRecorder) Record(packet []byte, info gopacket.CaptureInfo) {
 		return
 	}
 	if time.Now().After(r.expiresAt) {
-		r.active = false
-		r.activeFast.Store(false)
+		r.finishLocked(time.Now())
 		return
 	}
 	if r.options.Source.IsValid() || r.options.Destination.IsValid() || r.options.Port != 0 {
@@ -95,8 +108,7 @@ func (r *debugRecorder) Record(packet []byte, info gopacket.CaptureInfo) {
 		}
 	}
 	if r.buffer.Len()+len(packet)+16 > debugCaptureMaxBytes {
-		r.active = false
-		r.activeFast.Store(false)
+		r.finishLocked(time.Now())
 		return
 	}
 	info.CaptureLength = len(packet)
@@ -114,20 +126,56 @@ func (r *debugRecorder) Record(packet []byte, info gopacket.CaptureInfo) {
 func (r *debugRecorder) Status() DebugCaptureStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.active && time.Now().After(r.expiresAt) {
-		r.active = false
-		r.activeFast.Store(false)
-	}
+	r.expireLocked(time.Now())
 	return DebugCaptureStatus{Active: r.active, StartedAt: millis(r.startedAt), ExpiresAt: millis(r.expiresAt), Bytes: r.buffer.Len(), Packets: r.packets, MaxBytes: debugCaptureMaxBytes, Ready: !r.active && r.packets > 0, Filter: debugFilter(r.options)}
+}
+
+func (r *debugRecorder) expireLocked(now time.Time) {
+	if r.active && now.After(r.expiresAt) {
+		r.finishLocked(now)
+	}
+	if !r.active && !r.readyUntil.IsZero() && !now.Before(r.readyUntil) {
+		r.clearLocked()
+	}
+}
+
+func (r *debugRecorder) finish(generation uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if generation != r.generation {
+		return
+	}
+	r.finishLocked(time.Now())
+}
+
+func (r *debugRecorder) finishLocked(now time.Time) {
+	if !r.active {
+		return
+	}
+	r.active = false
+	r.activeFast.Store(false)
+	if r.packets == 0 {
+		r.clearLocked()
+		return
+	}
+	r.readyUntil = now.Add(debugCaptureRetention)
+	generation := r.generation
+	if r.expiryTimer != nil {
+		r.expiryTimer.Stop()
+	}
+	r.expiryTimer = time.AfterFunc(debugCaptureRetention, func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if generation == r.generation && !r.active {
+			r.clearLocked()
+		}
+	})
 }
 
 func (r *debugRecorder) Take() ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.active && time.Now().After(r.expiresAt) {
-		r.active = false
-		r.activeFast.Store(false)
-	}
+	r.expireLocked(time.Now())
 	if r.active {
 		return nil, errors.New("debug capture is still active")
 	}
@@ -136,13 +184,22 @@ func (r *debugRecorder) Take() ([]byte, error) {
 		return nil, errors.New("no debug capture is available")
 	}
 	result := append([]byte(nil), r.buffer.Bytes()...)
+	r.clearLocked()
+	return result, nil
+}
+
+func (r *debugRecorder) clearLocked() {
+	if r.expiryTimer != nil {
+		r.expiryTimer.Stop()
+		r.expiryTimer = nil
+	}
 	r.buffer.Reset()
 	r.writer = nil
 	r.packets = 0
 	r.startedAt = time.Time{}
 	r.expiresAt = time.Time{}
+	r.readyUntil = time.Time{}
 	r.options = DebugCaptureOptions{}
-	return result, nil
 }
 
 func debugFilter(options DebugCaptureOptions) string {

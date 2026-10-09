@@ -19,6 +19,54 @@ body {
   background:
     radial-gradient(circle at 10% -20%, #1b3628 0, transparent 32rem), #0c110e;
 }
+.login-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.login-card {
+  width: min(420px, 100%);
+  border: 1px solid #26342b;
+  border-radius: 14px;
+  background: rgba(17, 24, 20, 0.96);
+  box-shadow: 0 24px 70px #0008;
+  padding: 32px;
+}
+.login-card h1 {
+  margin-bottom: 10px;
+}
+.login-help {
+  color: #819087;
+  margin: 0 0 22px;
+}
+.login-card input {
+  width: 100%;
+  border: 1px solid #34463b;
+  border-radius: 8px;
+  background: #0b100d;
+  color: #e9f1eb;
+  padding: 12px;
+  outline: none;
+}
+.login-card input:focus {
+  border-color: #63e397;
+}
+.login-card button {
+  width: 100%;
+  margin: 14px 0 18px;
+}
+.login-card code {
+  display: block;
+  color: #65756b;
+  font-size: 11px;
+  text-align: center;
+}
+.login-error {
+  color: #ffaaaa;
+  font-size: 12px;
+  margin-top: 10px;
+}
 button,
 input {
   font: inherit;
@@ -94,6 +142,8 @@ button:disabled {
   margin-left: 0;
 }
 .download {
+  margin: 0;
+  background: transparent;
   border: 1px solid #4dbb76;
   border-radius: 8px;
   color: #78d99e;

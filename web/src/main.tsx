@@ -11,7 +11,27 @@ type DebugCapture = { active:boolean; started_at?:number; expires_at?:number; by
 type CaptureStatus = { capturing:boolean; interfaces:string[]; lan_prefixes:string[]; bpf_enabled:boolean; started_at?:number; errors?:Record<string,string>; packets:number; drops:number; queue_freezes:number; nft_set_enabled:boolean; nft_set_errors?:Record<string,string>; diagnostics:Diagnostics; debug_capture:DebugCapture }
 type Status = { version:string; capture:CaptureStatus; flow_count:number; event_drops:number }
 
-function App() {
+function Root() {
+  const [authenticated,setAuthenticated]=useState<boolean|null>(null)
+  useEffect(()=>{
+    fetch('/api/v1/auth/session').then(r=>r.json()).then(result=>setAuthenticated(result.authenticated)).catch(()=>setAuthenticated(false))
+    const expired=()=>setAuthenticated(false)
+    window.addEventListener('sniffd-auth-expired',expired)
+    return()=>window.removeEventListener('sniffd-auth-expired',expired)
+  },[])
+  if(authenticated===null)return <div className="login-shell"><div className="login-card"><p className="eyebrow">OPENWRT SNIFFD</p><h1>正在连接</h1></div></div>
+  return authenticated?<App onLogout={()=>setAuthenticated(false)}/>:<Login onSuccess={()=>setAuthenticated(true)}/>
+}
+
+function Login({onSuccess}:{onSuccess:()=>void}) {
+  const [token,setToken]=useState('')
+  const [error,setError]=useState('')
+  const [busy,setBusy]=useState(false)
+  const submit=async(e:React.FormEvent)=>{e.preventDefault();setBusy(true);setError('');try{const response=await fetch('/api/v1/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});if(!response.ok){setError(response.status===429?'尝试次数过多，请稍后再试':'Token 无效');return}setToken('');onSuccess()}catch{setError('无法连接 sniffd')}finally{setBusy(false)}}
+  return <div className="login-shell"><form className="login-card" onSubmit={submit}><p className="eyebrow">OPENWRT SNIFFD</p><h1>流量观察台</h1><p className="login-help">输入路由器上的访问 Token</p><input autoFocus autoComplete="off" type="password" value={token} onChange={e=>setToken(e.target.value)} placeholder="访问 Token"/>{error&&<div className="login-error">{error}</div>}<button disabled={busy||token.length===0}>{busy?'正在验证…':'登录'}</button><code>cat /etc/sniffd.token</code></form></div>
+}
+
+function App({onLogout}:{onLogout:()=>void}) {
   const [status,setStatus]=useState<Status|null>(null)
   const [flows,setFlows]=useState<Map<number,Flow>>(new Map())
   const [filter,setFilter]=useState('')
@@ -19,7 +39,7 @@ function App() {
   const [connectionState,setConnectionState]=useState<ConnectionStateFilter>('all')
   const [connected,setConnected]=useState(false)
 
-  const refresh=()=>fetch('/api/v1/status').then(r=>r.json()).then(setStatus)
+  const refresh=()=>apiFetch('/api/v1/status').then(r=>r.json()).then(setStatus).catch(()=>undefined)
   useEffect(()=>{ refresh(); const timer=setInterval(refresh,3000); return()=>clearInterval(timer) },[])
   useEffect(()=>{
     const scheme=location.protocol==='https:'?'wss':'ws'
@@ -30,13 +50,15 @@ function App() {
   },[])
   const rows=useMemo(()=>Array.from(flows.values()).filter(f=>directions.has(directionKey(f))&&(connectionState==='all'||f.connection_state===connectionState)&&`${f.source} ${f.destination} ${f.protocol} ${f.domain} ${f.proxy_set_match?'proxy':''}`.toLowerCase().includes(filter.toLowerCase())).sort((a,b)=>b.last_seen-a.last_seen).slice(0,1000),[flows,filter,directions,connectionState])
   const toggleDirection=(value:DirectionFilter)=>setDirections(previous=>{const next=new Set(previous);if(next.has(value))next.delete(value);else next.add(value);return next})
-  const action=async(name:'start'|'stop')=>{await fetch(`/api/v1/capture/${name}`,{method:'POST'});refresh()}
-  const clear=async()=>{await fetch('/api/v1/flows',{method:'DELETE'});setFlows(new Map());refresh()}
-  const debugAction=async(name:'start'|'stop')=>{await fetch(`/api/v1/debug/capture/${name}`,{method:'POST'});refresh()}
-  const debugFlow=async(f:Flow)=>{const source=endpoint(f.source);const destination=endpoint(f.destination);await fetch('/api/v1/debug/capture/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:source.address,destination:destination.address,port:destination.port})});refresh()}
+  const action=async(name:'start'|'stop')=>{await apiFetch(`/api/v1/capture/${name}`,{method:'POST'});refresh()}
+  const clear=async()=>{await apiFetch('/api/v1/flows',{method:'DELETE'});setFlows(new Map());refresh()}
+  const debugAction=async(name:'start'|'stop')=>{await apiFetch(`/api/v1/debug/capture/${name}`,{method:'POST'});refresh()}
+  const downloadDebug=async()=>{const response=await apiFetch('/api/v1/debug/capture.pcap',{method:'POST'});const blob=await response.blob();const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download='sniffd-debug.pcap';link.click();URL.revokeObjectURL(url);refresh()}
+  const debugFlow=async(f:Flow)=>{const source=endpoint(f.source);const destination=endpoint(f.destination);await apiFetch('/api/v1/debug/capture/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:source.address,destination:destination.address,port:destination.port})});refresh()}
+  const logout=async()=>{await fetch('/api/v1/auth/logout',{method:'POST'});onLogout()}
 
   return <main>
-    <header><div><p className="eyebrow">LIVE NETWORK WINDOW</p><h1>OpenWrt Sniff</h1></div><div className="actions"><span className={`dot ${connected?'online':''}`}/><span>{connected?'实时通道已连接':'正在重连'}</span>{status?.capture.capturing?<button className="stop" onClick={()=>action('stop')}>停止观察</button>:<button onClick={()=>action('start')}>开始观察</button>}</div></header>
+    <header><div><p className="eyebrow">LIVE NETWORK WINDOW</p><h1>OpenWrt Sniff</h1></div><div className="actions"><span className={`dot ${connected?'online':''}`}/><span>{connected?'实时通道已连接':'正在重连'}</span>{status?.capture.capturing?<button className="stop" onClick={()=>action('stop')}>停止观察</button>:<button onClick={()=>action('start')}>开始观察</button>}<button className="ghost" onClick={logout}>退出</button></div></header>
     {status?.capture.errors&&Object.entries(status.capture.errors).map(([name,message])=><div className="error" key={name}><strong>{name}</strong>: {message}</div>)}
     {status?.capture.nft_set_errors&&Object.entries(status.capture.nft_set_errors).map(([name,message])=><div className="warning" key={name}><strong>nft {name}</strong>: {message}</div>)}
     <section className="metrics">
@@ -44,7 +66,7 @@ function App() {
       <Metric label="窗口连接" value={String(flows.size)}/><Metric label="已识别流量" value={String(Array.from(flows.values()).filter(f=>f.protocol).length)}/><Metric label="内核丢包" value={String(status?.capture.drops??0)} warn={(status?.capture.drops??0)>0}/>
     </section>
     <section className="capture-detail"><span>接口 {status?.capture.interfaces.join(', ')||'—'}</span><span>LAN {status?.capture.lan_prefixes?.join(', ')||'自动发现中'}</span><span>cBPF {status?.capture.bpf_enabled?'已启用':'未启用'}</span><span>nft 标记 {status?.capture.nft_set_enabled?'已启用':'未配置'}</span><span>采集 {status?.capture.packets??0} 包</span><span>解码失败 {status?.capture.diagnostics?.decode_failures??0}</span><span>非 LAN {status?.capture.diagnostics?.non_lan_packets??0}</span><span>TCP 缺口 {status?.capture.diagnostics?.tcp_sequence_gaps??0}</span><span>重传 {status?.capture.diagnostics?.tcp_retransmissions??0}</span><span>队列冻结 {status?.capture.queue_freezes??0}</span><span>推送丢弃 {status?.event_drops??0}</span></section>
-    <section className="panel"><div className="toolbar"><div className="filters"><input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="搜索源、目的、协议、域名或 proxy"/><div className="filter-row"><div className="direction-filter">{directionOptions.map(option=><label className={directions.has(option.value)?'selected':''} key={option.value}><input type="checkbox" checked={directions.has(option.value)} onChange={()=>toggleDirection(option.value)}/>{option.label}</label>)}</div><div className="connection-filter">{(['all','active','closed'] as ConnectionStateFilter[]).map(value=><button className={connectionState===value?'selected':''} key={value} onClick={()=>setConnectionState(value)}>{value==='all'?'全部连接':value}</button>)}</div></div></div><div className="debug-actions">{status?.capture.debug_capture?.active?<button className="ghost" onClick={()=>debugAction('stop')}>停止诊断 ({formatBytes(status.capture.debug_capture.bytes)})</button>:status?.capture.debug_capture?.ready?<a className="download" href="/api/v1/debug/capture.pcap">下载诊断 pcap</a>:<button className="ghost" disabled={!status?.capture.capturing} onClick={()=>debugAction('start')}>诊断抓包 30 秒</button>}<button className="ghost" onClick={clear}>清空窗口</button></div></div>
+    <section className="panel"><div className="toolbar"><div className="filters"><input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="搜索源、目的、协议、域名或 proxy"/><div className="filter-row"><div className="direction-filter">{directionOptions.map(option=><label className={directions.has(option.value)?'selected':''} key={option.value}><input type="checkbox" checked={directions.has(option.value)} onChange={()=>toggleDirection(option.value)}/>{option.label}</label>)}</div><div className="connection-filter">{(['all','active','closed'] as ConnectionStateFilter[]).map(value=><button className={connectionState===value?'selected':''} key={value} onClick={()=>setConnectionState(value)}>{value==='all'?'全部连接':value}</button>)}</div></div></div><div className="debug-actions">{status?.capture.debug_capture?.active?<button className="ghost" onClick={()=>debugAction('stop')}>停止诊断 ({formatBytes(status.capture.debug_capture.bytes)})</button>:status?.capture.debug_capture?.ready?<button className="download" onClick={downloadDebug}>下载诊断 pcap</button>:<button className="ghost" disabled={!status?.capture.capturing} onClick={()=>debugAction('start')}>诊断抓包 30 秒</button>}<button className="ghost" onClick={clear}>清空窗口</button></div></div>
       <div className="table"><table><thead><tr><th>时间</th><th>方向</th><th>发起端</th><th>对端</th><th>网络</th><th>状态</th><th>识别</th><th>域名 / SNI</th><th>诊断</th><th>路径</th><th>流量</th></tr></thead><tbody>{rows.map(f=><tr key={f.id}><td>{new Date(f.last_seen).toLocaleTimeString()}</td><td><span className={`pill direction ${f.direction}`}>{directionLabel(f)}</span></td><td>{f.source}</td><td>{f.destination}</td><td><span className="pill">{f.network}</span></td><td>{f.connection_state?<span className={`pill connection ${f.connection_state}`}>{f.connection_state}</span>:<span className="muted">—</span>}</td><td>{f.protocol||<span className="muted">待识别</span>}</td><td className="domain">{f.domain||'—'}</td><td className="diagnostic" title={f.sniff_error}><span>{diagnosticText(f)}</span>{!f.protocol&&status?.capture.capturing&&!status.capture.debug_capture?.active&&<button className="trace" onClick={()=>debugFlow(f)}>抓此目标</button>}</td><td>{f.proxy_set_match?<span className="pill proxy">代理集合</span>:<span className="muted">直连/未知</span>}</td><td title={`发送 ${f.sent_packets} 包，接收 ${f.received_packets} 包`}><span className="traffic-up">↑ {formatBytes(f.sent_bytes)}</span><span className="traffic-down">↓ {formatBytes(f.received_bytes)}</span></td></tr>)}</tbody></table>{rows.length===0&&<div className="empty">{status?.capture.capturing?'当前筛选条件下暂无流量':'点击“开始观察”开启实时窗口'}</div>}</div>
     </section><footer>v{status?.version??'…'} · 仅内存窗口，不写入磁盘</footer>
   </main>
@@ -55,4 +77,5 @@ function diagnosticText(f:Flow){if(f.network!=='tcp')return f.sniff_state||'—'
 function directionKey(f:Flow):DirectionFilter{return f.direction==='internal'?`internal:${f.internal_type??'unicast'}`:f.direction}
 function directionLabel(f:Flow){if(f.direction==='outbound')return '出';if(f.direction==='inbound')return '入';return f.internal_type==='broadcast'?'内网广播':f.internal_type==='multicast'?'内网组播':'内网单播'}
 function endpoint(value:string){if(value.startsWith('[')){const end=value.indexOf(']');return {address:value.slice(1,end),port:Number(value.slice(end+2))}}const split=value.lastIndexOf(':');return {address:value.slice(0,split),port:Number(value.slice(split+1))}}
-createRoot(document.getElementById('root')!).render(<StrictMode><App/></StrictMode>)
+async function apiFetch(input:RequestInfo|URL,init?:RequestInit){const response=await fetch(input,init);if(response.status===401){window.dispatchEvent(new Event('sniffd-auth-expired'));throw new Error('authentication required')}return response}
+createRoot(document.getElementById('root')!).render(<StrictMode><Root/></StrictMode>)

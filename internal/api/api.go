@@ -23,21 +23,25 @@ type server struct {
 	static  http.Handler
 }
 
-func New(store *flow.Store, manager *capture.Manager, version string) http.Handler {
+func New(store *flow.Store, manager *capture.Manager, version, authToken string) http.Handler {
 	dist, _ := fs.Sub(webassets.Dist, "dist")
 	s := &server{store: store, capture: manager, version: version, static: http.FileServer(http.FS(dist))}
+	auth := newAuthenticator(authToken)
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/status", s.status)
-	mux.HandleFunc("GET /api/v1/flows", s.flows)
-	mux.HandleFunc("POST /api/v1/capture/start", s.start)
-	mux.HandleFunc("POST /api/v1/capture/stop", s.stop)
-	mux.HandleFunc("DELETE /api/v1/flows", s.clear)
-	mux.HandleFunc("POST /api/v1/debug/capture/start", s.debugStart)
-	mux.HandleFunc("POST /api/v1/debug/capture/stop", s.debugStop)
-	mux.HandleFunc("GET /api/v1/debug/capture.pcap", s.debugDownload)
-	mux.HandleFunc("GET /api/v1/events", s.events)
+	mux.HandleFunc("POST /api/v1/auth/login", auth.login)
+	mux.HandleFunc("POST /api/v1/auth/logout", auth.logout)
+	mux.HandleFunc("GET /api/v1/auth/session", auth.session)
+	mux.Handle("GET /api/v1/status", auth.protect(http.HandlerFunc(s.status)))
+	mux.Handle("GET /api/v1/flows", auth.protect(http.HandlerFunc(s.flows)))
+	mux.Handle("POST /api/v1/capture/start", auth.protect(http.HandlerFunc(s.start)))
+	mux.Handle("POST /api/v1/capture/stop", auth.protect(http.HandlerFunc(s.stop)))
+	mux.Handle("DELETE /api/v1/flows", auth.protect(http.HandlerFunc(s.clear)))
+	mux.Handle("POST /api/v1/debug/capture/start", auth.protect(http.HandlerFunc(s.debugStart)))
+	mux.Handle("POST /api/v1/debug/capture/stop", auth.protect(http.HandlerFunc(s.debugStop)))
+	mux.Handle("POST /api/v1/debug/capture.pcap", auth.protect(http.HandlerFunc(s.debugDownload)))
+	mux.Handle("GET /api/v1/events", auth.protect(http.HandlerFunc(s.events)))
 	mux.HandleFunc("/", s.frontend)
-	return mux
+	return securityHeaders(mux)
 }
 
 func (s *server) status(w http.ResponseWriter, _ *http.Request) {
@@ -65,6 +69,7 @@ func (s *server) debugStart(w http.ResponseWriter, r *http.Request) {
 		Port                uint16
 	}
 	if r.ContentLength != 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, 4096)
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			http.Error(w, "invalid debug capture request", http.StatusBadRequest)
 			return
