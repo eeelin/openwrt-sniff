@@ -33,9 +33,9 @@ Environment:
 
 Examples:
   curl -fsSL https://raw.githubusercontent.com/eeelin/openwrt-sniff/main/install.sh | sh
-  ./install.sh --version v0.6.0
+  ./install.sh --version v0.7.0
   ./install.sh --snapshot
-  ./install.sh --local /tmp/openwrt-sniff_0.6.0-1_x86_64.ipk
+  ./install.sh --local /tmp/openwrt-sniff_0.7.0-1_x86_64.ipk
 EOF
 }
 
