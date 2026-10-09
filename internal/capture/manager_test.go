@@ -139,6 +139,51 @@ func TestInboundFlowIsCaptured(t *testing.T) {
 	}
 }
 
+func TestTCPDirectionsAreCorrelated(t *testing.T) {
+	store := flow.NewStore(16, time.Minute)
+	manager := NewManager(nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, 1024, store, nil)
+	lan := [4]byte{192, 0, 2, 10}
+	remote := [4]byte{198, 51, 100, 20}
+	manager.consume(tcpFrame(lan, remote, 50000, 443, 1000, 0x02, nil))
+	manager.consume(tcpFrame(remote, lan, 443, 50000, 9000, 0x12, nil))
+	manager.consume(tcpFrame(lan, remote, 50000, 443, 1001, 0x18, []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")))
+	flows := store.Snapshot()
+	if len(flows) != 1 {
+		t.Fatalf("TCP directions were not correlated: %+v", flows)
+	}
+	got := flows[0]
+	if got.Direction != "outbound" || got.Source != "192.0.2.10:50000" || got.Destination != "198.51.100.20:443" {
+		t.Fatalf("unexpected connection orientation: %+v", got)
+	}
+	if got.SentPackets != 2 || got.ReceivedPackets != 1 || got.SentBytes == 0 || got.ReceivedBytes == 0 {
+		t.Fatalf("unexpected directional counters: %+v", got)
+	}
+	if got.Protocol != "http" || got.Domain != "example.com" {
+		t.Fatalf("forward protocol metadata was not retained: %+v", got)
+	}
+}
+
+func TestInboundTCPConnectionKeepsRemoteInitiator(t *testing.T) {
+	store := flow.NewStore(16, time.Minute)
+	manager := NewManager(nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, 1024, store, nil)
+	lan := [4]byte{192, 0, 2, 10}
+	remote := [4]byte{198, 51, 100, 20}
+	manager.consume(tcpFrame(remote, lan, 40000, 8443, 9000, 0x02, nil))
+	manager.consume(tcpFrame(lan, remote, 8443, 40000, 1000, 0x12, nil))
+	manager.consume(tcpFrame(remote, lan, 40000, 8443, 9001, 0x18, []byte("SSH-2.0-test\r\n")))
+	flows := store.Snapshot()
+	if len(flows) != 1 {
+		t.Fatalf("inbound TCP directions were not correlated: %+v", flows)
+	}
+	got := flows[0]
+	if got.Direction != "inbound" || got.Source != "198.51.100.20:40000" || got.Destination != "192.0.2.10:8443" {
+		t.Fatalf("remote initiator was not retained: %+v", got)
+	}
+	if got.SentPackets != 2 || got.ReceivedPackets != 1 || got.Protocol != "ssh" {
+		t.Fatalf("unexpected inbound connection metadata: %+v", got)
+	}
+}
+
 func tcpFrame(source, destination [4]byte, sourcePort, destinationPort uint16, sequence uint32, flags byte, payload []byte) []byte {
 	packet := make([]byte, 14+20+20+len(payload))
 	packet[12], packet[13] = 0x08, 0x00
