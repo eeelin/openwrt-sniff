@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -30,6 +32,9 @@ func New(store *flow.Store, manager *capture.Manager, version string) http.Handl
 	mux.HandleFunc("POST /api/v1/capture/start", s.start)
 	mux.HandleFunc("POST /api/v1/capture/stop", s.stop)
 	mux.HandleFunc("DELETE /api/v1/flows", s.clear)
+	mux.HandleFunc("POST /api/v1/debug/capture/start", s.debugStart)
+	mux.HandleFunc("POST /api/v1/debug/capture/stop", s.debugStop)
+	mux.HandleFunc("GET /api/v1/debug/capture.pcap", s.debugDownload)
 	mux.HandleFunc("GET /api/v1/events", s.events)
 	mux.HandleFunc("/", s.frontend)
 	return mux
@@ -52,6 +57,53 @@ func (s *server) stop(w http.ResponseWriter, _ *http.Request) { s.capture.Stop()
 func (s *server) clear(w http.ResponseWriter, _ *http.Request) {
 	s.store.Clear()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) debugStart(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Source, Destination string
+		Port                uint16
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid debug capture request", http.StatusBadRequest)
+			return
+		}
+	}
+	options := capture.DebugCaptureOptions{Port: request.Port}
+	var err error
+	if request.Source != "" {
+		options.Source, err = netip.ParseAddr(request.Source)
+	}
+	if err == nil && request.Destination != "" {
+		options.Destination, err = netip.ParseAddr(request.Destination)
+	}
+	if err != nil {
+		http.Error(w, "invalid debug capture address", http.StatusBadRequest)
+		return
+	}
+	if err := s.capture.StartDebugCapture(options); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	s.status(w, nil)
+}
+
+func (s *server) debugStop(w http.ResponseWriter, _ *http.Request) {
+	s.capture.StopDebugCapture()
+	s.status(w, nil)
+}
+
+func (s *server) debugDownload(w http.ResponseWriter, _ *http.Request) {
+	data, err := s.capture.TakeDebugCapture()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.tcpdump.pcap")
+	w.Header().Set("Content-Disposition", `attachment; filename="sniffd-debug.pcap"`)
+	w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+	_, _ = w.Write(data)
 }
 
 func (s *server) events(w http.ResponseWriter, r *http.Request) {
