@@ -43,6 +43,12 @@ type packetState struct {
 	sniff   sniff.PacketState
 	touched time.Time
 }
+type connectionState struct {
+	finForward bool
+	finReverse bool
+	closed     bool
+	touched    time.Time
+}
 type Status struct {
 	Capturing     bool               `json:"capturing"`
 	Interfaces    []string           `json:"interfaces"`
@@ -77,6 +83,7 @@ type Manager struct {
 	status          Status
 	streams         map[flow.Key]*streamState
 	packetStreams   map[flow.Key]*packetState
+	connections     map[flow.Key]*connectionState
 	packets         uint64
 	generation      uint64
 	active          int
@@ -91,7 +98,7 @@ type Manager struct {
 }
 
 func NewManager(interfaces []string, prefixes []netip.Prefix, maxStream int, store *flow.Store, matcher *nftset.Matcher) *Manager {
-	return &Manager{interfaces: interfaces, prefixes: prefixes, maxStream: maxStream, store: store, matcher: matcher, streams: make(map[flow.Key]*streamState), packetStreams: make(map[flow.Key]*packetState), status: Status{Interfaces: interfaces}}
+	return &Manager{interfaces: interfaces, prefixes: prefixes, maxStream: maxStream, store: store, matcher: matcher, streams: make(map[flow.Key]*streamState), packetStreams: make(map[flow.Key]*packetState), connections: make(map[flow.Key]*connectionState), status: Status{Interfaces: interfaces}}
 }
 
 func (m *Manager) Start() error {
@@ -164,6 +171,7 @@ func (m *Manager) Stop() {
 	m.status.Capturing = false
 	m.streams = make(map[flow.Key]*streamState)
 	m.packetStreams = make(map[flow.Key]*packetState)
+	m.connections = make(map[flow.Key]*connectionState)
 	m.mu.Unlock()
 }
 func (m *Manager) Status() Status {
@@ -270,7 +278,7 @@ func (m *Manager) consume(packet []byte) {
 		m.pruneStreamsLocked(time.Now())
 	}
 	m.mu.Unlock()
-	protocol, domain := "", ""
+	protocol, domain, connectionStatus := "", "", ""
 	diagnostic := flow.Diagnostic{State: "pending"}
 	if proto == 17 {
 		var sniffErr error
@@ -307,6 +315,30 @@ func (m *Manager) consume(packet []byte) {
 			delete(m.streams, reverseKey(rawKey))
 			m.store.Reset(key)
 			state = nil
+			m.connections[key] = &connectionState{}
+		}
+		connection := m.connections[key]
+		if connection == nil {
+			connection = &connectionState{}
+			m.connections[key] = connection
+		}
+		if flags&0x04 != 0 {
+			connection.closed = true
+		}
+		if flags&0x01 != 0 {
+			if forward {
+				connection.finForward = true
+			} else {
+				connection.finReverse = true
+			}
+		}
+		if connection.finForward && connection.finReverse {
+			connection.closed = true
+		}
+		connection.touched = time.Now()
+		connectionStatus = "active"
+		if connection.closed {
+			connectionStatus = "closed"
 		}
 		if state == nil {
 			state = &streamState{state: "waiting_for_payload"}
@@ -404,7 +436,7 @@ func (m *Manager) consume(packet []byte) {
 	}
 	proxySetMatch := m.matcher != nil && m.matcher.Contains(proxyAddress)
 	initiatorKnown := proto == 6 && flags&0x02 != 0 && flags&0x10 == 0
-	m.store.Observe(key, len(packet), protocol, domain, direction, internalType, forward, initiatorKnown, proxySetMatch, diagnostic)
+	m.store.Observe(key, len(packet), protocol, domain, direction, internalType, connectionStatus, forward, initiatorKnown, proxySetMatch, diagnostic)
 }
 
 func connectionKey(key flow.Key, direction string) (flow.Key, bool) {
@@ -585,6 +617,11 @@ func (m *Manager) pruneStreamsLocked(now time.Time) {
 			delete(m.packetStreams, key)
 		}
 	}
+	for key, state := range m.connections {
+		if state.touched.Before(cutoff) {
+			delete(m.connections, key)
+		}
+	}
 	for len(m.streams) > 8192 {
 		var oldestKey flow.Key
 		var oldest time.Time
@@ -600,6 +637,16 @@ func (m *Manager) pruneStreamsLocked(now time.Time) {
 			delete(m.packetStreams, key)
 			break
 		}
+	}
+	for len(m.connections) > 8192 {
+		var oldestKey flow.Key
+		var oldest time.Time
+		for key, state := range m.connections {
+			if oldest.IsZero() || state.touched.Before(oldest) {
+				oldestKey, oldest = key, state.touched
+			}
+		}
+		delete(m.connections, oldestKey)
 	}
 }
 

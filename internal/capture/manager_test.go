@@ -77,6 +77,45 @@ func TestTCPConnectionReuseAndClose(t *testing.T) {
 	}
 }
 
+func TestTCPConnectionStateTracksFINAndRST(t *testing.T) {
+	store := flow.NewStore(16, time.Minute)
+	manager := NewManager(nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, 1024, store, nil)
+	lan := [4]byte{192, 0, 2, 10}
+	remote := [4]byte{198, 51, 100, 20}
+
+	manager.consume(tcpFrame(lan, remote, 50000, 443, 1000, 0x02, nil))
+	if got := store.Snapshot()[0].ConnectionState; got != "active" {
+		t.Fatalf("SYN state = %q, want active", got)
+	}
+	manager.consume(tcpFrame(lan, remote, 50000, 443, 1001, 0x11, nil))
+	if got := store.Snapshot()[0].ConnectionState; got != "active" {
+		t.Fatalf("one-sided FIN state = %q, want active", got)
+	}
+	manager.consume(tcpFrame(remote, lan, 443, 50000, 9000, 0x11, nil))
+	if got := store.Snapshot()[0].ConnectionState; got != "closed" {
+		t.Fatalf("two-sided FIN state = %q, want closed", got)
+	}
+
+	manager.consume(tcpFrame(lan, remote, 50000, 443, 7000, 0x02, nil))
+	flows := store.Snapshot()
+	if len(flows) != 1 || flows[0].ConnectionState != "active" {
+		t.Fatalf("reused connection was not reset to active: %+v", flows)
+	}
+	manager.consume(tcpFrame(remote, lan, 443, 50000, 12000, 0x14, nil))
+	if got := store.Snapshot()[0].ConnectionState; got != "closed" {
+		t.Fatalf("RST state = %q, want closed", got)
+	}
+}
+
+func TestUDPHasNoConnectionState(t *testing.T) {
+	store := flow.NewStore(16, time.Minute)
+	manager := NewManager(nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, 1024, store, nil)
+	manager.consume(udpFrame([4]byte{192, 0, 2, 10}, [4]byte{198, 51, 100, 20}, 50000, 53, nil))
+	if got := store.Snapshot()[0].ConnectionState; got != "" {
+		t.Fatalf("UDP connection state = %q, want empty", got)
+	}
+}
+
 func TestEthernetPaddingBeforePayloadDoesNotPoisonStream(t *testing.T) {
 	store := flow.NewStore(16, time.Minute)
 	manager := NewManager(nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, 1024, store, nil)
@@ -198,5 +237,21 @@ func tcpFrame(source, destination [4]byte, sourcePort, destinationPort uint16, s
 	binary.BigEndian.PutUint32(tcp[4:8], sequence)
 	tcp[12], tcp[13] = 5<<4, flags
 	copy(tcp[20:], payload)
+	return packet
+}
+
+func udpFrame(source, destination [4]byte, sourcePort, destinationPort uint16, payload []byte) []byte {
+	packet := make([]byte, 14+20+8+len(payload))
+	packet[12], packet[13] = 0x08, 0x00
+	ip := packet[14:]
+	ip[0], ip[9] = 0x45, 17
+	binary.BigEndian.PutUint16(ip[2:4], uint16(20+8+len(payload)))
+	copy(ip[12:16], source[:])
+	copy(ip[16:20], destination[:])
+	udp := ip[20:]
+	binary.BigEndian.PutUint16(udp[0:2], sourcePort)
+	binary.BigEndian.PutUint16(udp[2:4], destinationPort)
+	binary.BigEndian.PutUint16(udp[4:6], uint16(8+len(payload)))
+	copy(udp[8:], payload)
 	return packet
 }

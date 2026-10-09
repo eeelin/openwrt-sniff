@@ -195,6 +195,35 @@ button:disabled {
   flex-wrap: wrap;
   gap: 6px;
 }
+.filter-row,
+.connection-filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.filter-row {
+  gap: 12px;
+}
+.connection-filter {
+  padding-left: 12px;
+  border-left: 1px solid #2b3830;
+}
+.connection-filter button {
+  margin: 0;
+  border: 1px solid #2b3830;
+  border-radius: 999px;
+  background: transparent;
+  color: #74847a;
+  font-size: 11px;
+  padding: 5px 9px;
+  text-transform: capitalize;
+}
+.connection-filter button.selected {
+  border-color: #3c8157;
+  background: #16291d;
+  color: #78d99e;
+}
 .direction-filter label {
   border: 1px solid #2b3830;
   border-radius: 999px;
@@ -281,6 +310,14 @@ td {
 .pill.proxy {
   background: #26243b;
   color: #bcb4ff;
+}
+.pill.connection.active {
+  background: #1d3025;
+  color: #78d99e;
+}
+.pill.connection.closed {
+  background: #302526;
+  color: #d99a9a;
 }
 .pill.direction.internal {
   background: #1c3040;
