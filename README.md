@@ -14,6 +14,8 @@ NFQUEUE, or forwarding rules.
 - live WebSocket updates with no persistent storage
 - direction-aware flows for inbound, outbound, and LAN communication; LAN flows
   distinguish unicast, multicast, and broadcast traffic
+- bidirectional TCP connection correlation with separate sent/received packet
+  and byte counters
 - capture starts and stops from the web page
 - automatic LAN prefix discovery and optional explicit IPv4/IPv6 prefixes
 - AF_PACKET packet-drop/queue-freeze counters and per-interface capture errors

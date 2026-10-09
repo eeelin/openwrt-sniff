@@ -294,6 +294,18 @@ td {
   background: #39291d;
   color: #efb77d;
 }
+.traffic-up,
+.traffic-down {
+  display: block;
+  font: 11px ui-monospace, monospace;
+}
+.traffic-up {
+  color: #78d99e;
+}
+.traffic-down {
+  color: #efb77d;
+  margin-top: 3px;
+}
 .muted {
   color: #59675f;
 }

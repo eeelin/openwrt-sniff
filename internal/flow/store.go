@@ -14,27 +14,32 @@ type Key struct {
 }
 
 type Flow struct {
-	ID             uint64 `json:"id"`
-	FirstSeen      int64  `json:"first_seen"`
-	LastSeen       int64  `json:"last_seen"`
-	Source         string `json:"source"`
-	Destination    string `json:"destination"`
-	Network        string `json:"network"`
-	Direction      string `json:"direction"`
-	InternalType   string `json:"internal_type,omitempty"`
-	Protocol       string `json:"protocol,omitempty"`
-	Domain         string `json:"domain,omitempty"`
-	PacketsSeen    uint64 `json:"packets_seen"`
-	BytesSampled   uint64 `json:"bytes_sampled"`
-	ProxySetMatch  bool   `json:"proxy_set_match"`
-	Classification string `json:"classification"`
-	SniffState     string `json:"sniff_state,omitempty"`
-	SniffError     string `json:"sniff_error,omitempty"`
-	StreamBytes    int    `json:"stream_bytes,omitempty"`
-	ExpectedBytes  int    `json:"expected_bytes,omitempty"`
-	TCPSYNSeen     bool   `json:"tcp_syn_seen,omitempty"`
-	TCPGapPackets  uint64 `json:"tcp_gap_packets,omitempty"`
-	TCPRetransmits uint64 `json:"tcp_retransmissions,omitempty"`
+	ID              uint64 `json:"id"`
+	FirstSeen       int64  `json:"first_seen"`
+	LastSeen        int64  `json:"last_seen"`
+	Source          string `json:"source"`
+	Destination     string `json:"destination"`
+	Network         string `json:"network"`
+	Direction       string `json:"direction"`
+	InternalType    string `json:"internal_type,omitempty"`
+	Protocol        string `json:"protocol,omitempty"`
+	Domain          string `json:"domain,omitempty"`
+	PacketsSeen     uint64 `json:"packets_seen"`
+	BytesSampled    uint64 `json:"bytes_sampled"`
+	SentPackets     uint64 `json:"sent_packets"`
+	SentBytes       uint64 `json:"sent_bytes"`
+	ReceivedPackets uint64 `json:"received_packets"`
+	ReceivedBytes   uint64 `json:"received_bytes"`
+	ProxySetMatch   bool   `json:"proxy_set_match"`
+	Classification  string `json:"classification"`
+	SniffState      string `json:"sniff_state,omitempty"`
+	SniffError      string `json:"sniff_error,omitempty"`
+	StreamBytes     int    `json:"stream_bytes,omitempty"`
+	ExpectedBytes   int    `json:"expected_bytes,omitempty"`
+	TCPSYNSeen      bool   `json:"tcp_syn_seen,omitempty"`
+	TCPGapPackets   uint64 `json:"tcp_gap_packets,omitempty"`
+	TCPRetransmits  uint64 `json:"tcp_retransmissions,omitempty"`
+	primaryForward  bool
 }
 
 type Diagnostic struct {
@@ -64,13 +69,18 @@ func NewStore(max int, window time.Duration) *Store {
 	return &Store{items: make(map[Key]*Flow), max: max, window: window, subs: make(map[chan Event]struct{})}
 }
 
-func (s *Store) Observe(key Key, size int, protocol, domain, direction, internalType string, proxySetMatch bool, diagnostic Diagnostic) Flow {
+func (s *Store) Observe(key Key, size int, protocol, domain, direction, internalType string, forward, initiatorKnown, proxySetMatch bool, diagnostic Diagnostic) Flow {
 	now := time.Now().UnixMilli()
 	s.mu.Lock()
 	f, ok := s.items[key]
 	eventType := "flow.update"
 	if !ok {
-		f = &Flow{ID: s.nextID.Add(1), FirstSeen: now, Source: key.Source.String(), Destination: key.Destination.String(), Classification: "pending"}
+		f = &Flow{ID: s.nextID.Add(1), FirstSeen: now, Classification: "pending", primaryForward: forward}
+		if forward {
+			f.Source, f.Destination = key.Source.String(), key.Destination.String()
+		} else {
+			f.Source, f.Destination = key.Destination.String(), key.Source.String()
+		}
 		if key.Network == 6 {
 			f.Network = "tcp"
 		} else {
@@ -81,7 +91,22 @@ func (s *Store) Observe(key Key, size int, protocol, domain, direction, internal
 		eventType = "flow.open"
 	}
 	f.LastSeen, f.PacketsSeen, f.BytesSampled = now, f.PacketsSeen+1, f.BytesSampled+uint64(size)
-	f.Direction, f.InternalType = direction, internalType
+	if initiatorKnown && f.primaryForward != forward {
+		f.SentPackets, f.ReceivedPackets = f.ReceivedPackets, f.SentPackets
+		f.SentBytes, f.ReceivedBytes = f.ReceivedBytes, f.SentBytes
+		f.Source, f.Destination = f.Destination, f.Source
+		f.primaryForward = forward
+	}
+	if forward == f.primaryForward {
+		f.SentPackets++
+		f.SentBytes += uint64(size)
+	} else {
+		f.ReceivedPackets++
+		f.ReceivedBytes += uint64(size)
+	}
+	if !ok || initiatorKnown {
+		f.Direction, f.InternalType = direction, internalType
+	}
 	if protocol != "" {
 		f.Protocol = protocol
 	}
@@ -92,15 +117,17 @@ func (s *Store) Observe(key Key, size int, protocol, domain, direction, internal
 		f.Classification = "identified"
 	}
 	f.ProxySetMatch = f.ProxySetMatch || proxySetMatch
-	if diagnostic.State != "" {
-		f.SniffState = diagnostic.State
+	if forward == f.primaryForward || protocol != "" {
+		if diagnostic.State != "" {
+			f.SniffState = diagnostic.State
+		}
+		f.SniffError = diagnostic.Error
+		f.StreamBytes = diagnostic.StreamBytes
+		f.ExpectedBytes = diagnostic.ExpectedBytes
+		f.TCPSYNSeen = f.TCPSYNSeen || diagnostic.TCPSYNSeen
+		f.TCPGapPackets = diagnostic.TCPGapPackets
+		f.TCPRetransmits = diagnostic.TCPRetransmissions
 	}
-	f.SniffError = diagnostic.Error
-	f.StreamBytes = diagnostic.StreamBytes
-	f.ExpectedBytes = diagnostic.ExpectedBytes
-	f.TCPSYNSeen = f.TCPSYNSeen || diagnostic.TCPSYNSeen
-	f.TCPGapPackets = diagnostic.TCPGapPackets
-	f.TCPRetransmits = diagnostic.TCPRetransmissions
 	if f.Protocol != "" {
 		f.SniffState = "identified"
 		f.SniffError = ""

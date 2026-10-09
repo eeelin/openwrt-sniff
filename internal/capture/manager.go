@@ -259,7 +259,11 @@ func (m *Manager) consume(packet []byte) {
 		m.nonLAN.Add(1)
 		return
 	}
-	key := flow.Key{Source: netip.AddrPortFrom(src, sport), Destination: netip.AddrPortFrom(dst, dport), Network: proto}
+	rawKey := flow.Key{Source: netip.AddrPortFrom(src, sport), Destination: netip.AddrPortFrom(dst, dport), Network: proto}
+	key, forward := rawKey, true
+	if proto == 6 {
+		key, forward = connectionKey(rawKey, direction)
+	}
 	m.mu.Lock()
 	m.packets++
 	if m.packets%512 == 0 {
@@ -271,13 +275,13 @@ func (m *Manager) consume(packet []byte) {
 	if proto == 17 {
 		var sniffErr error
 		m.mu.Lock()
-		state, retained := m.packetStreams[key]
+		state, retained := m.packetStreams[rawKey]
 		if retained {
 			protocol, domain, sniffErr = sniff.Packet(sport, dport, payload, &state.sniff)
 			diagnostic = packetDiagnostic(protocol, sniffErr)
 			state.touched = time.Now()
 			if domain != "" {
-				delete(m.packetStreams, key)
+				delete(m.packetStreams, rawKey)
 			}
 			m.mu.Unlock()
 		} else {
@@ -287,8 +291,8 @@ func (m *Manager) consume(packet []byte) {
 			diagnostic = packetDiagnostic(protocol, sniffErr)
 			if protocol == "quic" && domain == "" {
 				m.mu.Lock()
-				if _, exists := m.packetStreams[key]; !exists {
-					m.packetStreams[key] = candidate
+				if _, exists := m.packetStreams[rawKey]; !exists {
+					m.packetStreams[rawKey] = candidate
 				}
 				m.mu.Unlock()
 			}
@@ -296,16 +300,17 @@ func (m *Manager) consume(packet []byte) {
 	}
 	if proto == 6 {
 		m.mu.Lock()
-		state := m.streams[key]
+		state := m.streams[rawKey]
 		newConnection := flags&0x02 != 0 && flags&0x10 == 0 && (state == nil || !state.synSeen || state.synSequence != seq)
 		if newConnection {
-			delete(m.streams, key)
+			delete(m.streams, rawKey)
+			delete(m.streams, reverseKey(rawKey))
 			m.store.Reset(key)
 			state = nil
 		}
 		if state == nil {
 			state = &streamState{state: "waiting_for_payload"}
-			m.streams[key] = state
+			m.streams[rawKey] = state
 		}
 		if flags&0x02 != 0 {
 			state.synSeen = true
@@ -347,6 +352,17 @@ func (m *Manager) consume(packet []byte) {
 				state.state = "identified"
 				state.lastError = ""
 				state.data = nil
+				reverse := m.streams[reverseKey(rawKey)]
+				if reverse == nil {
+					reverse = &streamState{}
+					m.streams[reverseKey(rawKey)] = reverse
+				}
+				reverse.done = true
+				reverse.state = "identified"
+				reverse.data = nil
+				reverse.pending = nil
+				reverse.pendingBytes = 0
+				reverse.touched = time.Now()
 			} else if len(state.pending) > 0 {
 				state.state = "sequence_gap"
 			} else {
@@ -375,7 +391,10 @@ func (m *Manager) consume(packet []byte) {
 		state.touched = time.Now()
 		diagnostic = flow.Diagnostic{State: state.state, Error: state.lastError, StreamBytes: len(state.data), ExpectedBytes: state.expectedBytes, TCPSYNSeen: state.synSeen, TCPGapPackets: state.gaps, TCPRetransmissions: state.retransmissions}
 		if closed {
-			delete(m.streams, key)
+			delete(m.streams, rawKey)
+			if state.done {
+				delete(m.streams, reverseKey(rawKey))
+			}
 		}
 		m.mu.Unlock()
 	}
@@ -384,7 +403,32 @@ func (m *Manager) consume(packet []byte) {
 		proxyAddress = src
 	}
 	proxySetMatch := m.matcher != nil && m.matcher.Contains(proxyAddress)
-	m.store.Observe(key, len(packet), protocol, domain, direction, internalType, proxySetMatch, diagnostic)
+	initiatorKnown := proto == 6 && flags&0x02 != 0 && flags&0x10 == 0
+	m.store.Observe(key, len(packet), protocol, domain, direction, internalType, forward, initiatorKnown, proxySetMatch, diagnostic)
+}
+
+func connectionKey(key flow.Key, direction string) (flow.Key, bool) {
+	if direction == "outbound" {
+		return key, true
+	}
+	if direction == "inbound" {
+		return reverseKey(key), false
+	}
+	if addrPortLess(key.Destination, key.Source) {
+		return reverseKey(key), false
+	}
+	return key, true
+}
+
+func reverseKey(key flow.Key) flow.Key {
+	return flow.Key{Source: key.Destination, Destination: key.Source, Network: key.Network}
+}
+
+func addrPortLess(left, right netip.AddrPort) bool {
+	if comparison := left.Addr().Compare(right.Addr()); comparison != 0 {
+		return comparison < 0
+	}
+	return left.Port() < right.Port()
 }
 
 func (m *Manager) classifyDirection(packet []byte, src, dst netip.Addr) (direction, internalType string) {
