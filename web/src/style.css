@@ -83,6 +83,23 @@ button.ghost {
   color: #9bab9f;
   border: 1px solid #29352e;
 }
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.debug-actions {
+  gap: 8px;
+}
+.debug-actions button {
+  margin-left: 0;
+}
+.download {
+  border: 1px solid #4dbb76;
+  border-radius: 8px;
+  color: #78d99e;
+  padding: 9px 12px;
+  text-decoration: none;
+}
 .error,
 .warning {
   padding: 12px 15px;
@@ -206,6 +223,22 @@ td {
 .domain {
   color: #eef5f0;
   font-weight: 650;
+}
+.diagnostic {
+  color: #91a097;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.diagnostic .trace {
+  background: transparent;
+  border: 1px solid #34463b;
+  color: #91a097;
+  font-size: 10px;
+  margin-left: 8px;
+  padding: 4px 7px;
 }
 .pill {
   padding: 3px 7px;

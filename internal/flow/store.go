@@ -26,6 +26,20 @@ type Flow struct {
 	BytesSampled   uint64 `json:"bytes_sampled"`
 	ProxySetMatch  bool   `json:"proxy_set_match"`
 	Classification string `json:"classification"`
+	SniffState     string `json:"sniff_state,omitempty"`
+	SniffError     string `json:"sniff_error,omitempty"`
+	StreamBytes    int    `json:"stream_bytes,omitempty"`
+	ExpectedBytes  int    `json:"expected_bytes,omitempty"`
+	TCPSYNSeen     bool   `json:"tcp_syn_seen,omitempty"`
+	TCPGapPackets  uint64 `json:"tcp_gap_packets,omitempty"`
+	TCPRetransmits uint64 `json:"tcp_retransmissions,omitempty"`
+}
+
+type Diagnostic struct {
+	State, Error                      string
+	StreamBytes, ExpectedBytes        int
+	TCPSYNSeen                        bool
+	TCPGapPackets, TCPRetransmissions uint64
 }
 
 type Event struct {
@@ -48,7 +62,7 @@ func NewStore(max int, window time.Duration) *Store {
 	return &Store{items: make(map[Key]*Flow), max: max, window: window, subs: make(map[chan Event]struct{})}
 }
 
-func (s *Store) Observe(key Key, size int, protocol, domain string, proxySetMatch bool) Flow {
+func (s *Store) Observe(key Key, size int, protocol, domain string, proxySetMatch bool, diagnostic Diagnostic) Flow {
 	now := time.Now().UnixMilli()
 	s.mu.Lock()
 	f, ok := s.items[key]
@@ -75,6 +89,19 @@ func (s *Store) Observe(key Key, size int, protocol, domain string, proxySetMatc
 		f.Classification = "identified"
 	}
 	f.ProxySetMatch = f.ProxySetMatch || proxySetMatch
+	if diagnostic.State != "" {
+		f.SniffState = diagnostic.State
+	}
+	f.SniffError = diagnostic.Error
+	f.StreamBytes = diagnostic.StreamBytes
+	f.ExpectedBytes = diagnostic.ExpectedBytes
+	f.TCPSYNSeen = f.TCPSYNSeen || diagnostic.TCPSYNSeen
+	f.TCPGapPackets = diagnostic.TCPGapPackets
+	f.TCPRetransmits = diagnostic.TCPRetransmissions
+	if f.Protocol != "" {
+		f.SniffState = "identified"
+		f.SniffError = ""
+	}
 	copyFlow := *f
 	s.pruneLocked(now)
 	s.publishLocked(Event{Type: eventType, Flow: copyFlow})

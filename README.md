@@ -25,6 +25,26 @@ protocols are DNS, HTTP, TLS, QUIC, SSH, RDP, STUN, DTLS, NTP, and BitTorrent
 (TCP handshake, UDP tracker, and uTP SYN). Signatures inspect only bounded flow
 prefixes and do not retain payloads after classification.
 
+## Built-in diagnostics
+
+Each flow reports its protocol inspection state, buffered/expected bytes,
+whether a TCP SYN was observed, and TCP sequence gaps or retransmissions. The
+dashboard can also start a 30-second in-memory packet capture globally or for a
+selected source/destination. Captures stop at 2 MiB, are never written to disk,
+and are cleared after the PCAP file is downloaded.
+
+The diagnostic capture API is:
+
+```text
+POST /api/v1/debug/capture/start
+POST /api/v1/debug/capture/stop
+GET  /api/v1/debug/capture.pcap
+```
+
+The start request optionally accepts `source`, `destination`, and `port` in a
+JSON body. Leaving the body empty captures all TCP/UDP packets already accepted
+by sniffd's socket filter.
+
 The observer records LAN-originated flows, including traffic later intercepted
 by sing-box. Capture only LAN-facing interfaces to avoid counting the sing-box
 outbound connection as a second client flow.
@@ -106,6 +126,8 @@ OpenWrt 22.03 emits an `.ipk`; OpenWrt 25.12 emits an `.apk`.
 The dashboard exposes observed destinations and domain names. Keep port 8088
 restricted to trusted LAN zones. Authentication and TLS termination are not part
 of v0.1; use an authenticated reverse proxy if untrusted clients can reach it.
+Diagnostic PCAP files contain packet payloads, so enable diagnostic capture only
+when needed and do not expose its API to untrusted clients.
 
 ## Attribution
 
