@@ -4,6 +4,8 @@ import "net/netip"
 
 type Result struct {
 	Protocol     string
+	Application  string
+	Transport    string
 	Domain       string
 	DomainSource string
 	ALPN         []string

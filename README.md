@@ -25,7 +25,7 @@ NFQUEUE, or forwarding rules.
 ## P1 protocol detection
 
 Detection is content-based rather than limited to well-known ports. Supported
-protocols are DNS, HTTP, TLS, QUIC, SSH, RDP, STUN, DTLS, NTP, and BitTorrent
+protocols are DNS, HTTP, TLS, QUIC, WeChat MMTLS, SSH, RDP, STUN, DTLS, NTP, and BitTorrent
 (TCP handshake, UDP tracker, and uTP SYN). Signatures inspect only bounded flow
 prefixes and do not retain payloads after classification.
 
@@ -35,6 +35,12 @@ an ECH extension was offered. DNS A/AAAA responses (including CNAME chains) are
 kept in a client-isolated, TTL-bound in-memory cache so later connections can be
 annotated with a `dns_inferred` domain when HTTP Host or SNI is unavailable. The
 DNS cache is capped at 8192 entries and is never persisted.
+
+WeChat MMTLS detection validates the proprietary `f1.04` record framing and
+ClientHello/ServerHello structure rather than relying on ports or Tencent IP
+ranges. Direct MMTLS TCP sessions are labeled `longlink`; MMTLS carried in an
+HTTP request body (or explicitly advertised by `Upgrade: mmtls`) is labeled
+`shortlink`. Payloads remain encrypted and are not retained.
 
 TCP inspection tracks connection boundaries from SYN/FIN/RST, resets reused
 five-tuples, and performs bounded out-of-order prefix reassembly. TLS
