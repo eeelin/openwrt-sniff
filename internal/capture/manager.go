@@ -422,7 +422,7 @@ func (m *Manager) consume(packet []byte) {
 			state.state = "stream_limit"
 			state.lastError = "flow prefix reached configured stream limit"
 		}
-		if len(state.data) >= 5 && state.data[0] == 0x16 {
+		if len(state.data) >= 5 && (state.data[0] == 0x16 || (state.data[0] == 0x19 && state.data[1] == 0xf1 && state.data[2] == 0x04)) {
 			state.expectedBytes = 5 + int(binary.BigEndian.Uint16(state.data[3:5]))
 		}
 		closed := flags&(0x01|0x04) != 0
@@ -446,7 +446,7 @@ func (m *Manager) consume(packet []byte) {
 	proxySetMatch := m.matcher != nil && m.matcher.Contains(proxyAddress)
 	m.enrichFromDNS(&detection, src, dst, direction, time.Now())
 	initiatorKnown := proto == 6 && flags&0x02 != 0 && flags&0x10 == 0
-	m.store.Observe(key, len(packet), flow.Detection{Protocol: detection.Protocol, Domain: detection.Domain, DomainSource: detection.DomainSource, Version: detection.Version, ALPN: detection.ALPN, ECH: detection.ECH, Confidence: detection.Confidence}, direction, internalType, connectionStatus, forward, initiatorKnown, proxySetMatch, diagnostic)
+	m.store.Observe(key, len(packet), flow.Detection{Protocol: detection.Protocol, Application: detection.Application, Transport: detection.Transport, Domain: detection.Domain, DomainSource: detection.DomainSource, Version: detection.Version, ALPN: detection.ALPN, ECH: detection.ECH, Confidence: detection.Confidence}, direction, internalType, connectionStatus, forward, initiatorKnown, proxySetMatch, diagnostic)
 }
 
 func (m *Manager) enrichFromDNS(result *sniff.Result, source, destination netip.Addr, direction string, now time.Time) {

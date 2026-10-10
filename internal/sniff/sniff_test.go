@@ -15,6 +15,62 @@ func TestHTTPHost(t *testing.T) {
 	}
 }
 
+func TestMMTLSLonglinkClientHello(t *testing.T) {
+	result, err := Stream(mmtlsHello(0x16, 1))
+	if err != nil || result.Protocol != "mmtls" || result.Application != "wechat" || result.Transport != "longlink" || result.Version != "MMTLS f1.04" || result.Confidence != "content" {
+		t.Fatalf("unexpected MMTLS result: result=%+v err=%v", result, err)
+	}
+}
+
+func TestMMTLSResumptionLonglink(t *testing.T) {
+	result, err := Stream(mmtlsHello(0x19, 1))
+	if err != nil || result.Protocol != "mmtls" || result.Transport != "longlink" {
+		t.Fatalf("unexpected MMTLS resumption result: result=%+v err=%v", result, err)
+	}
+}
+
+func TestMMTLSPartialRecordNeedsMore(t *testing.T) {
+	packet := mmtlsHello(0x16, 1)
+	for _, length := range []int{1, 3, 5, len(packet) - 1} {
+		if _, err := Stream(packet[:length]); !errors.Is(err, ErrNeedMore) {
+			t.Fatalf("length %d: expected ErrNeedMore, got %v", length, err)
+		}
+	}
+}
+
+func TestMMTLSRejectsCoincidentalRecordHeader(t *testing.T) {
+	packet := mmtlsHello(0x16, 1)
+	packet[9] = 3
+	if result, err := Stream(packet); err == nil || result.Protocol != "" {
+		t.Fatalf("invalid MMTLS hello was classified: result=%+v err=%v", result, err)
+	}
+}
+
+func TestMMTLSShortlinkBody(t *testing.T) {
+	body := mmtlsHello(0x19, 1)
+	request := append([]byte("POST /mmtls HTTP/1.1\r\nHost: short.weixin.qq.com\r\nContent-Type: application/octet-stream\r\n\r\n"), body...)
+	result, err := Stream(request)
+	if err != nil || result.Protocol != "mmtls" || result.Application != "wechat" || result.Transport != "shortlink" || result.Domain != "short.weixin.qq.com" || result.DomainSource != "http_host" {
+		t.Fatalf("unexpected MMTLS shortlink result: result=%+v err=%v", result, err)
+	}
+}
+
+func TestMMTLSShortlinkUpgradeHeader(t *testing.T) {
+	request := []byte("POST / HTTP/1.1\r\nHost: dns.weixin.qq.com\r\nUpgrade: mmtls\r\n\r\n")
+	result, err := Stream(request)
+	if err != nil || result.Protocol != "mmtls" || result.Application != "wechat" || result.Transport != "shortlink" {
+		t.Fatalf("unexpected MMTLS upgrade result: result=%+v err=%v", result, err)
+	}
+}
+
+func TestMMTLSShortlinkMicroMessengerHeader(t *testing.T) {
+	request := []byte("POST / HTTP/1.1\r\nHost: short.weixin.qq.com\r\nUser-Agent: MicroMessenger Client\r\n\r\n")
+	result, err := Stream(request)
+	if err != nil || result.Protocol != "mmtls" || result.Application != "wechat" || result.Transport != "shortlink" {
+		t.Fatalf("unexpected MicroMessenger result: result=%+v err=%v", result, err)
+	}
+}
+
 func TestDNS(t *testing.T) {
 	packet := make([]byte, 12)
 	binary.BigEndian.PutUint16(packet[4:6], 1)
@@ -224,5 +280,11 @@ func tlsClientHelloMetadataRecord(host string) []byte {
 
 func tlsRecord(payload []byte) []byte {
 	record := []byte{0x16, 0x03, 0x03, byte(len(payload) >> 8), byte(len(payload))}
+	return append(record, payload...)
+}
+
+func mmtlsHello(recordType, helloType byte) []byte {
+	payload := []byte{0, 0, 0, 7, helloType, 0x03, 0xf1, 1, 0, 0, 0}
+	record := []byte{recordType, 0xf1, 0x04, 0, byte(len(payload))}
 	return append(record, payload...)
 }

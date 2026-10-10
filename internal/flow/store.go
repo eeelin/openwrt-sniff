@@ -14,38 +14,40 @@ type Key struct {
 }
 
 type Flow struct {
-	ID              uint64   `json:"id"`
-	FirstSeen       int64    `json:"first_seen"`
-	LastSeen        int64    `json:"last_seen"`
-	Source          string   `json:"source"`
-	Destination     string   `json:"destination"`
-	Network         string   `json:"network"`
-	ConnectionState string   `json:"connection_state,omitempty"`
-	Direction       string   `json:"direction"`
-	InternalType    string   `json:"internal_type,omitempty"`
-	Protocol        string   `json:"protocol,omitempty"`
-	Domain          string   `json:"domain,omitempty"`
-	DomainSource    string   `json:"domain_source,omitempty"`
-	ProtocolVersion string   `json:"protocol_version,omitempty"`
-	ALPN            []string `json:"alpn,omitempty"`
-	ECH             bool     `json:"ech,omitempty"`
-	Confidence      string   `json:"confidence,omitempty"`
-	PacketsSeen     uint64   `json:"packets_seen"`
-	BytesSampled    uint64   `json:"bytes_sampled"`
-	SentPackets     uint64   `json:"sent_packets"`
-	SentBytes       uint64   `json:"sent_bytes"`
-	ReceivedPackets uint64   `json:"received_packets"`
-	ReceivedBytes   uint64   `json:"received_bytes"`
-	ProxySetMatch   bool     `json:"proxy_set_match"`
-	Classification  string   `json:"classification"`
-	SniffState      string   `json:"sniff_state,omitempty"`
-	SniffError      string   `json:"sniff_error,omitempty"`
-	StreamBytes     int      `json:"stream_bytes,omitempty"`
-	ExpectedBytes   int      `json:"expected_bytes,omitempty"`
-	TCPSYNSeen      bool     `json:"tcp_syn_seen,omitempty"`
-	TCPGapPackets   uint64   `json:"tcp_gap_packets,omitempty"`
-	TCPRetransmits  uint64   `json:"tcp_retransmissions,omitempty"`
-	primaryForward  bool
+	ID                uint64   `json:"id"`
+	FirstSeen         int64    `json:"first_seen"`
+	LastSeen          int64    `json:"last_seen"`
+	Source            string   `json:"source"`
+	Destination       string   `json:"destination"`
+	Network           string   `json:"network"`
+	ConnectionState   string   `json:"connection_state,omitempty"`
+	Direction         string   `json:"direction"`
+	InternalType      string   `json:"internal_type,omitempty"`
+	Protocol          string   `json:"protocol,omitempty"`
+	Application       string   `json:"application,omitempty"`
+	ProtocolTransport string   `json:"protocol_transport,omitempty"`
+	Domain            string   `json:"domain,omitempty"`
+	DomainSource      string   `json:"domain_source,omitempty"`
+	ProtocolVersion   string   `json:"protocol_version,omitempty"`
+	ALPN              []string `json:"alpn,omitempty"`
+	ECH               bool     `json:"ech,omitempty"`
+	Confidence        string   `json:"confidence,omitempty"`
+	PacketsSeen       uint64   `json:"packets_seen"`
+	BytesSampled      uint64   `json:"bytes_sampled"`
+	SentPackets       uint64   `json:"sent_packets"`
+	SentBytes         uint64   `json:"sent_bytes"`
+	ReceivedPackets   uint64   `json:"received_packets"`
+	ReceivedBytes     uint64   `json:"received_bytes"`
+	ProxySetMatch     bool     `json:"proxy_set_match"`
+	Classification    string   `json:"classification"`
+	SniffState        string   `json:"sniff_state,omitempty"`
+	SniffError        string   `json:"sniff_error,omitempty"`
+	StreamBytes       int      `json:"stream_bytes,omitempty"`
+	ExpectedBytes     int      `json:"expected_bytes,omitempty"`
+	TCPSYNSeen        bool     `json:"tcp_syn_seen,omitempty"`
+	TCPGapPackets     uint64   `json:"tcp_gap_packets,omitempty"`
+	TCPRetransmits    uint64   `json:"tcp_retransmissions,omitempty"`
+	primaryForward    bool
 }
 
 type Diagnostic struct {
@@ -56,9 +58,9 @@ type Diagnostic struct {
 }
 
 type Detection struct {
-	Protocol, Domain, DomainSource, Version, Confidence string
-	ALPN                                                []string
-	ECH                                                 bool
+	Protocol, Application, Transport, Domain, DomainSource, Version, Confidence string
+	ALPN                                                                        []string
+	ECH                                                                         bool
 }
 
 type Event struct {
@@ -121,6 +123,12 @@ func (s *Store) Observe(key Key, size int, detection Detection, direction, inter
 	}
 	if detection.Protocol != "" {
 		f.Protocol = detection.Protocol
+	}
+	if detection.Application != "" {
+		f.Application = detection.Application
+	}
+	if detection.Transport != "" {
+		f.ProtocolTransport = detection.Transport
 	}
 	if connectionState != "" {
 		f.ConnectionState = connectionState

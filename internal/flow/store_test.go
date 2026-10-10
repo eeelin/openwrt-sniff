@@ -37,3 +37,12 @@ func TestProtocolMetadataOverridesInferredDomain(t *testing.T) {
 		t.Fatalf("unexpected structured detection: %+v", got)
 	}
 }
+
+func TestApplicationAndTransportMetadata(t *testing.T) {
+	store := NewStore(10, time.Minute)
+	key := Key{Source: netip.MustParseAddrPort("192.0.2.10:40000"), Destination: netip.MustParseAddrPort("198.51.100.20:8080"), Network: 6}
+	got := store.Observe(key, 64, Detection{Protocol: "mmtls", Application: "wechat", Transport: "longlink", Version: "MMTLS f1.04", Confidence: "content"}, "outbound", "", "active", true, true, false, Diagnostic{})
+	if got.Protocol != "mmtls" || got.Application != "wechat" || got.ProtocolTransport != "longlink" || got.ProtocolVersion != "MMTLS f1.04" {
+		t.Fatalf("unexpected application metadata: %+v", got)
+	}
+}

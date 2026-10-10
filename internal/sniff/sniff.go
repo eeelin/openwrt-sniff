@@ -16,12 +16,17 @@ func Stream(data []byte) (Result, error) {
 	if len(data) == 0 {
 		return Result{}, ErrNeedMore
 	}
+	if result, err := mmtls(data); err == nil || errors.Is(err, ErrNeedMore) {
+		if err == nil {
+			result.Transport = "longlink"
+		}
+		return result, err
+	}
 	if looksTLS(data) {
 		return tls(data)
 	}
 	if looksHTTP(data) {
-		protocol, domain, err := http(data)
-		return Result{Protocol: protocol, Domain: domain, DomainSource: domainSource(domain, "http_host"), Confidence: "content"}, err
+		return http(data)
 	}
 	if matchPrefix(data, []byte("SSH-2.0-")) {
 		if !bytes.Contains(data, []byte{'\n'}) {
@@ -118,11 +123,11 @@ func matchPrefix(data, signature []byte) bool {
 	return compare > 0 && bytes.Equal(data[:compare], signature[:compare])
 }
 
-func http(data []byte) (string, string, error) {
+func http(data []byte) (Result, error) {
 	s := string(data)
 	lineEnd := strings.Index(s, "\r\n")
 	if lineEnd < 0 {
-		return "", "", ErrNeedMore
+		return Result{}, ErrNeedMore
 	}
 	first := s[:lineEnd]
 	methods := []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT ", "TRACE "}
@@ -134,22 +139,42 @@ func http(data []byte) (string, string, error) {
 		}
 	}
 	if !valid {
-		return "", "", errors.New("not http")
+		return Result{}, errors.New("not http")
 	}
 	headEnd := strings.Index(s, "\r\n\r\n")
 	if headEnd < 0 {
-		return "", "", ErrNeedMore
+		return Result{}, ErrNeedMore
 	}
+	result := Result{Protocol: "http", Confidence: "content"}
+	upgradeMMTLS := false
+	microMessenger := false
 	for _, line := range strings.Split(s[lineEnd+2:headEnd], "\r\n") {
 		if len(line) >= 5 && strings.EqualFold(line[:5], "host:") {
 			host := strings.TrimSpace(line[5:])
 			if i := strings.LastIndex(host, ":"); i > 0 {
 				host = host[:i]
 			}
-			return "http", strings.Trim(host, "[]"), nil
+			result.Domain = strings.Trim(host, "[]")
+			result.DomainSource = domainSource(result.Domain, "http_host")
+		} else if len(line) >= 8 && strings.EqualFold(line[:8], "upgrade:") && strings.EqualFold(strings.TrimSpace(line[8:]), "mmtls") {
+			upgradeMMTLS = true
+		} else if len(line) >= 11 && strings.EqualFold(line[:11], "user-agent:") && strings.HasPrefix(strings.ToLower(strings.TrimSpace(line[11:])), "micromessenger") {
+			microMessenger = true
 		}
 	}
-	return "http", "", nil
+	body := data[headEnd+4:]
+	if detected, err := mmtls(body); err == nil {
+		detected.Domain, detected.DomainSource = result.Domain, result.DomainSource
+		detected.Transport = "shortlink"
+		return detected, nil
+	}
+	if upgradeMMTLS || microMessenger {
+		result.Protocol = "mmtls"
+		result.Application = "wechat"
+		result.Transport = "shortlink"
+		result.Version = mmtlsVersion
+	}
+	return result, nil
 }
 
 func tls(data []byte) (Result, error) {
